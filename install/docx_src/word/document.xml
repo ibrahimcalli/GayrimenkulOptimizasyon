@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+
+<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t xml:space="preserve">Gayrimenkul360</w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:b/><w:sz w:val="28"/></w:rPr><w:t xml:space="preserve">Ofis Portföy, CRM, Görev ve Mesai Yönetim Sistemi</w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:i/><w:color w:val="808080"/></w:rPr><w:t xml:space="preserve">Kurulum ve Kullanım Kılavuzu - Sürüm 1.0</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">1. Genel Bakış</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Gayrimenkul360, bir gayrimenkul ofisinin portföylerini, taşınmaz sahibi/müşteri kayıtlarını (CRM), çalışan görevlerini, hedeflerini ve mesailerini yöneten bir masaüstü uygulamasıdır. Rust dilinde yazılmıştır ve Windows ile Linux üzerinde çalışır.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Sistem iki bileşenden oluşur:</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">1) Sunucu (gayrimenkul-server): Ofisteki bir bilgisayarda çalışır. Tüm verileri (veritabanı ve resimler) bu bilgisayarda saklar.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">2) İstemci (gayrimenkul-client): Her çalışanın bilgisayarında çalışan programdır. Sunucuya bağlanarak veri okur/yazar.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Aynı internete/ağa bağlı tüm bilgisayarlar aynı sunucuya bağlandığında, bir çalışanın girdiği portföy ve kayıtlar diğer kullanıcıların ve yöneticinin ekranına anında düşer. Ticari bir abonelik gerekmez; sistem tamamen ofis içi yerel ağ (LAN) üzerinden çalışır.</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">2. Sistem Gereksinimleri</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">Sunucu bilgisayar</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Windows 10/11 veya modern bir Linux dağıtımı</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Tercihen sabit (statik) yerel IP adresi</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Yeterli disk alanı (resimler için)</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">İstemci bilgisayarlar</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Windows 10/11 veya Linux</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Sunucu bilgisayar ile aynı ağda olmalı</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">3. Kurulum Yöntemleri</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">Yöntem A - Hazır çalıştırılabilir dosyalar (önerilen)</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Paket içinde derlenmiş ikili dosyalar varsa (target/release klasörü), Rust kurmaya gerek yoktur. Sadece start-server ve start-client betiklerini çalıştırın.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Not: Her işletim sistemi için ayrı derleme gerekir. Windows için Windows'ta, Linux için Linux'ta derlenmelidir.</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">Yöntem B - Kaynak koddan derleme</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">1) Rust araç zincirini kurun: https://rustup.rs adresinden rustup ile kurulum yapın.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">2) Windows'ta ek olarak "Visual Studio C++ Build Tools" (MSVC) kurulmalıdır.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">3) Linux'ta grafik arayüz için gerekli paketleri kurun: libx11-dev, libxkbcommon-dev, libwayland-dev, libgl1-mesa-dev (dağıtıma göre isim değişebilir).</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">4) Proje kök klasöründe şu komutu çalıştırın: cargo build --release</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">5) Derleme bitince target/release/gayrimenkul-server ve target/release/gayrimenkul-client dosyaları oluşur.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Windows'ta kolay yol: build-release.bat dosyasına çift tıklayın. Linux'ta: ./build-release.sh</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr><w:r><w:t xml:space="preserve">Windows ikililerini üretme (adım adım)</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Rust, ikili dosyaları derlendiği işletim sistemi için üretir. Bu nedenle Windows .exe dosyaları Windows üzerinde derlenmelidir.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">1) https://rustup.rs adresinden rustup-init.exe dosyasını indirip çalıştırın (varsayılan Quick install).</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">2) https://visualstudio.microsoft.com/visual-cpp-build-tools/ adresinden Build Tools for Visual Studio kurun ve Desktop development with C++ iş yükünü seçin.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">3) Yeni bir komut isteminde cargo --version ve rustc --version komutlarıyla kurulumu doğrulayın.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">4) Proje klasöründe build-release.bat dosyasına çift tıklayın (veya cargo build --release komutunu çalıştırın).</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">5) Çıktılar: target/release/gayrimenkul-server.exe ve target/release/gayrimenkul-client.exe. İlk derleme paketleri indirdiği için 5-15 dakika sürebilir.</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">4. Sunucunun Kurulması (Ofis Ana Bilgisayarı)</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">1) Sunucu olacak bilgisayara paketi kopyalayın.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">2) Windows'ta start-server.bat, Linux'ta ./start-server.sh dosyasını çalıştırın.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">3) Siyah pencerede sunucunun adresleri yazacaktır. Örnek: Yerel adres http://127.0.0.1:8080 ve Ağ adresi http://192.168.1.25:8080</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">4) Ağ adresini (örneğin http://192.168.1.25:8080) not edin. Diğer bilgisayarlar bu adresi kullanacaktır.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">5) Sunucu penceresini kapatmayın; sunucu açık kaldığı sürece sistem çalışır.</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">Güvenlik duvarı (önemli)</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Diğer bilgisayarların bağlanabilmesi için 8080 portuna izin verilmelidir.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Windows: Gelişmiş Güvenlik Duvarı'nda Gelen Kuralı oluşturup TCP 8080 portuna izin verin.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Linux: sudo ufw allow 8080/tcp komutunu çalıştırın.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Otomatik sunucu bulma için ayrıca UDP 8085 portuna izin verin (yalnızca otomatik bulma kullanılacaksa gereklidir).</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">5. İstemcenin Kurulması (Çalışan Bilgisayarları)</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">1) Paketi her çalışanın bilgisayarına kopyalayın.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">2) Windows'ta start-client.bat, Linux'ta ./start-client.sh dosyasını çalıştırın.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">3) Açılan giriş ekranında "Sunucu Adresi" alanına sunucunun ağ adresini yazın. Örnek: http://192.168.1.25:8080</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">4) Kullanıcı adı ve parolanız ile giriş yapın. Sunucu adresi bir kez girildikten sonra client_config.json dosyasına kaydedilir.</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">5.1 Wi-Fi / Ağ Senkronizasyonu ve Otomatik Sunucu Bulma</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Sistem, sunucu ile istemciler arasında TCP/IP kullanır. Bu nedenle kablolu (Ethernet) ağda olduğu gibi Wi-Fi ağında da çalışır. Aynı Wi-Fi ağına bağlı tüm bilgisayarlar aynı sunucuya bağlanır ve kayıtlar anında senkronize olur.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Otomatik sunucu bulma: Sunucu açıldığında UDP 8085 portu üzerinden kendini ağa duyurur. İstemcinin giriş ekranındaki "Ağdaki Sunucuları Bul" butonu ağdaki sunucuları listeler; seçince adres otomatik dolar.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Güvenlik duvarında TCP 8080 (bağlantı) ve UDP 8085 (otomatik bulma) portlarına izin verilmelidir.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Wi-Fi ipuçları: Bilgisayarlar aynı SSID/ağda olmalıdır. Misafir ağı (Guest Network) cihazları birbirinden yalıtır; ana ağı kullanın. Sunucuya modem üzerinden sabit IP vermek önerilir.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">İnternet üzerinden uzaktan erişim: İstemci bir alan adı/URL de kabul eder. Router üzerinde 8080 portu sunucuya yönlendirilirse veya bir tünel/reverse-proxy kullanılırsa uzaktaki bilgisayarlar da bağlanabilir. Güvenlik için VPN veya HTTPS önerilir.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Karşılama ekranı 15 saniyede bir otomatik yenilenir; diğer çalışanların eklediği portföyler kısa sürede görünür.</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">6. İlk Giriş ve Yönetici İşlemleri</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Varsayılan yönetici hesabı: kullanıcı adı admin, parola admin123</w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">- Güvenlik için ilk girişten sonra Profilim bölümünden mutlaka parolanızı değiştirin.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Yönetici, Kullanıcılar bölümünden her çalışan için ayrı kullanıcı adı ve parola oluşturur.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Her çalışan Profilim bölümünden ad soyad, telefon, e-posta ve profil fotoğrafını girer.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Çıktı Ayarları bölümünde (yalnızca yönetici), üretilen belgelerde hangi bilgilerin görüneceği seçilir.</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">7. Özellikler ve Kullanım</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">Portföyler</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Yeni Portföy ekranından taşınmaz bilgileri doldurulur; ilçe ve mahalle önceden tanımlı listeden seçilir (Muğla ve tüm ilçeleri).</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Taşınmaz sahibine ait bilgiler girilirse otomatik olarak CRM kaydı oluşturulur ve portföye bağlanır.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Resimler "Resim Ekle" butonu ile seçilir veya pencereye sürüklenip bırakılır. İlk resim kapak resmi olur.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Portföye konum (enlem/boylam) girilebilir; detay ekranından haritada açılabilir.</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">Karşılama ekranı</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Portföyler en güncelden en eskiye sıralanır.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Görsel (thumbnail) veya Liste görünümü seçilebilir. Liste görünümünde de küçük resim kullanılır.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- İlçe, tür, durum filtreleri ve metin arama bulunur.</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">CRM kayıtları (yalnızca yönetici)</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Taşınmaz sahibi ve müşteri kayıtlarını yalnızca yönetici görebilir. Danışmanlar portföy kaydı sırasında sahip bilgisi girebilir ancak CRM listesini göremez.</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">Görevler ve bildirimler</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Bir çalışana veya tüm ekibe görev/not atanabilir. Tarih ve saat girilebilir (örnek: Cumartesi 16:00 toplantı).</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Görev atandığında ilgili çalışanın Bildirimler bölümüne otomatik bildirim düşer.</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">Hedefler</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Çalışana veya tüm ekibe dönemsel hedefler atanır (örnek: Bir ayda 5 portföy, en az 2 yayına alma, en az 1 kiralama).</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Gerçekleşme durumu portföy kayıtlarından otomatik hesaplanır ve ilerleme çubuğu olarak gösterilir.</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">Mesai takibi</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Çalışanlar mesai giriş ve çıkışını tek tıkla kaydeder; toplam süre otomatik hesaplanır. Yönetici tüm kayıtları görebilir.</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">Çıktı ve paylaşım</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Portföy detayından PDF veya DOCX tanıtım belgesi üretilir. DOCX çıktısı kapak resmini de içerir.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Belge altında iletişim ve isim bilgileri; Çıktı Ayarları'nda seçilen alanlar görünür.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Oluşan dosyalar, kullanıcının ev klasöründeki Gayrimenkul360-Cikti klasörüne kaydedilir ve otomatik açılır.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- WhatsApp ile Paylaş butonu, portföy özetini WhatsApp üzerinden paylaşmak için tarayıcıyı açar.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Not: PDF yerleşik fontlarla üretildiğinden Türkçe karakterler sadeleştirilebilir. Tam Türkçe karakter desteği için DOCX çıktısı önerilir.</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">8. Veri Depolama ve Yedekleme</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Tüm veriler sunucu bilgisayarında, çalıştırıldığı klasörün yanındaki data klasöründe tutulur.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- data/gayrimenkul.db: veritabanı. data/uploads: portföy ve profil resimleri.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Yedek almak için sunucuyu kapatıp data klasörünü kopyalamanız yeterlidir.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Tek tıkla yedek: Yönetici, Çıktı Ayarları bölümünden "Sunucu Yedeğini İndir (ZIP)" butonuyla veritabanı ve tüm resimleri içeren bir ZIP indirir. Dosya, kullanıcının ev klasöründeki Gayrimenkul360-Cikti altına kaydedilir.</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">9. Gelişmiş Ayarlar (Ortam Değişkenleri)</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- GAYRIMENKUL_PORT: Sunucu portunu değiştirir (varsayılan 8080).</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- GAYRIMENKUL_DATA: Veri klasörünün yerini belirtir.</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">10. Sorun Giderme</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- "Sunucuya bağlanılamadı": Sunucu programı açık mı, ağ adresi doğru mu, güvenlik duvarı 8080 portuna izin veriyor mu kontrol edin.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Diğer bilgisayardan bağlanamıyorum: Sunucunun ağ adresini (127.0.0.1 yerine 192.168.x.x) kullandığınızdan emin olun.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Linux'ta pencere açılmıyor: Gerekli grafik kütüphanelerinin kurulu olduğundan emin olun.</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Parolamı unuttum: Yönetici, Kullanıcılar bölümünden parolayı güncelleyebilir.</w:t></w:r></w:p>
+
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">11. Dosya Yapısı</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- Cargo.toml: Proje tanımı (workspace)</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- crates/common: Ortak veri modelleri ve Muğla ilçe/mahalle verisi</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- crates/server: Sunucu uygulaması (axum, SQLite)</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- crates/client: Masaüstü arayüzü (egui/eframe)</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- install: Bu kılavuz ve kurulum dosyaları</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">- start-server / start-client ve build-release betikleri</w:t></w:r></w:p>
+
+<w:p><w:r><w:t xml:space="preserve"> </w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:i/><w:color w:val="808080"/></w:rPr><w:t xml:space="preserve">Gayrimenkul360 - Bu kılavuz programın install klasöründe yer alır.</w:t></w:r></w:p>
+
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr>
+</w:body>
+</w:document>

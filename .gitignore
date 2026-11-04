@@ -1,0 +1,44 @@
+# --- Rust / Cargo derleme çıktıları ---
+/target
+**/target
+**/*.rs.bk
+*.pdb
+*.rlib
+*.rmeta
+
+# --- Çalışma zamanı verileri (sunucu) ---
+/data
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- İstemci yerel yapılandırması ---
+client_config.json
+
+# --- Çıktılar, yedekler ve paketler ---
+/gayrimenkul360.zip
+*.zip
+/Gayrimenkul360-Cikti
+/Gayrimenkul360-Cikti/
+
+# --- Ortam değişkenleri / sırlar ---
+.env
+.env.*
+*.key
+*.pem
+
+# --- İşletim sistemi dosyaları ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Editör / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
