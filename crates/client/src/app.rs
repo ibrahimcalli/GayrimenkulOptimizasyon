@@ -99,6 +99,25 @@ pub struct CrmForm {
     pub notes: String,
 }
 
+#[derive(Clone, Default)]
+pub struct ShiftPlanForm {
+    pub user_idx: usize,
+    pub month: String,
+    pub work_days: i64,
+    pub daily_hours: f64,
+    pub start_time: String,
+    pub end_time: String,
+    pub note: String,
+}
+
+#[derive(Clone, Default)]
+pub struct ShiftAttendanceForm {
+    pub user_idx: usize,
+    pub date: String,
+    pub hours: f64,
+    pub note: String,
+}
+
 pub struct App {
     pub api: Api,
     pub screen: Screen,
@@ -107,7 +126,13 @@ pub struct App {
     pub portfolios: Vec<Portfolio>,
     pub tasks: Vec<Task>,
     pub goals: Vec<Goal>,
-    pub shifts: Vec<Shift>,
+    pub plans: Vec<ShiftPlan>,
+    pub attendance: Vec<ShiftAttendance>,
+    pub shift_tab: usize,
+    pub card_scale: f32,
+    pub show_deleted: bool,
+    pub crm_list_view: bool,
+    pub task_assignees_sel: Vec<i64>,
     pub crm: Vec<CrmRecord>,
     pub notifications: Vec<Notification>,
     pub settings: OutputSettings,
@@ -128,6 +153,8 @@ pub struct App {
     pub task_form: TaskForm,
     pub goal_form: GoalForm,
     pub crm_form: CrmForm,
+    pub plan_form: ShiftPlanForm,
+    pub att_form: ShiftAttendanceForm,
 
     pub profile_name: String,
     pub profile_phone: String,
@@ -152,6 +179,20 @@ pub struct App {
     pub connected: bool,
     pub last_health: f64,
     pub last_auto_refresh: f64,
+
+    // Görünüm (yerel tercihler)
+    pub theme: String, // "dark" | "light" | "system"
+    pub zoom: f64,
+    pub local_theme_set: bool,
+    pub settings_tab: SettingsTab,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    View,
+    Output,
+    Validation,
+    Users,
 }
 
 const CURRENCIES: [&str; 4] = ["TRY", "USD", "EUR", "GBP"];
@@ -168,6 +209,8 @@ const METRICS: [&str; 5] = [
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Türkçe karakter desteği: Roboto fontlarını varsayılan yap.
+        Self::install_turkish_fonts(&cc.egui_ctx);
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         cc.egui_ctx.set_style(style);
@@ -179,7 +222,7 @@ impl App {
             cfg.server_url
         };
 
-        Self {
+        let mut app = Self {
             api: Api::new(server_url.clone()),
             screen: Screen::Login,
             user: None,
@@ -187,7 +230,13 @@ impl App {
             portfolios: Vec::new(),
             tasks: Vec::new(),
             goals: Vec::new(),
-            shifts: Vec::new(),
+            plans: Vec::new(),
+            attendance: Vec::new(),
+            shift_tab: 0,
+            card_scale: 1.0,
+            show_deleted: false,
+            crm_list_view: false,
+            task_assignees_sel: Vec::new(),
             crm: Vec::new(),
             notifications: Vec::new(),
             settings: OutputSettings::default(),
@@ -204,6 +253,8 @@ impl App {
             task_form: TaskForm::default(),
             goal_form: GoalForm::default(),
             crm_form: CrmForm::default(),
+            plan_form: ShiftPlanForm::default(),
+            att_form: ShiftAttendanceForm::default(),
             profile_name: String::new(),
             profile_phone: String::new(),
             profile_email: String::new(),
@@ -224,6 +275,52 @@ impl App {
             connected: false,
             last_health: 0.0,
             last_auto_refresh: 0.0,
+            theme: if cfg.theme.is_empty() { "system".to_string() } else { cfg.theme.clone() },
+            zoom: if cfg.zoom > 0.05 { cfg.zoom } else { 1.0 },
+            local_theme_set: !cfg.theme.is_empty(),
+            settings_tab: SettingsTab::View,
+        };
+        app.apply_theme(&cc.egui_ctx);
+        cc.egui_ctx.set_zoom_factor(app.zoom as f32);
+        app
+    }
+
+    /// Tema tercihini egui'ye uygular.
+    fn apply_theme(&self, ctx: &egui::Context) {
+        let pref = match self.theme.as_str() {
+            "dark" => egui::ThemePreference::Dark,
+            "light" => egui::ThemePreference::Light,
+            _ => egui::ThemePreference::System,
+        };
+        ctx.set_theme(pref);
+    }
+
+    /// Yakınlaştırma (UI ölçek) değerini uygular ve yerel yapılandırmaya kaydeder.
+    fn set_zoom(&mut self, ctx: &egui::Context, zoom: f64) {
+        let z = zoom.clamp(0.6, 2.5);
+        self.zoom = z;
+        ctx.set_zoom_factor(z as f32);
+        self.save_config();
+    }
+
+    /// Ctrl +/−/0 kısayolları ile dinamik ölçeklendirme.
+    fn handle_zoom_shortcuts(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.modifiers.ctrl) {
+            return;
+        }
+        let (plus, minus, reset) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Equals) || i.key_pressed(egui::Key::Plus),
+                i.key_pressed(egui::Key::Minus),
+                i.key_pressed(egui::Key::Num0),
+            )
+        });
+        if plus {
+            self.set_zoom(ctx, self.zoom + 0.1);
+        } else if minus {
+            self.set_zoom(ctx, self.zoom - 0.1);
+        } else if reset {
+            self.set_zoom(ctx, 1.0);
         }
     }
 
@@ -247,10 +344,30 @@ impl App {
     fn save_config(&self) {
         let cfg = ClientConfig {
             server_url: self.server_url.clone(),
+            theme: self.theme.clone(),
+            zoom: self.zoom,
         };
         if let Ok(s) = serde_json::to_string_pretty(&cfg) {
             let _ = std::fs::write(config_file(), s);
         }
+    }
+
+    /// Yerel kayıtlı tercih yoksa sunucudaki varsayılan görünümü uygular.
+    fn apply_server_ui_defaults(&mut self, ctx: &egui::Context) {
+        if self.local_theme_set {
+            return;
+        }
+        let s = self.settings.clone();
+        if !s.default_theme.is_empty() {
+            self.theme = s.default_theme.clone();
+        }
+        if s.default_zoom > 0.05 {
+            self.zoom = s.default_zoom;
+        }
+        self.local_theme_set = true;
+        self.apply_theme(ctx);
+        ctx.set_zoom_factor(self.zoom as f32);
+        self.save_config();
     }
 
     // ---------------- veri yükleme ----------------
@@ -260,7 +377,8 @@ impl App {
         self.load_users();
         self.load_tasks();
         self.load_goals();
-        self.load_shifts();
+        self.load_plans();
+        self.load_attendance();
         self.load_notifications();
         self.load_settings();
         if self.is_admin() {
@@ -284,7 +402,7 @@ impl App {
         };
         let owner = if self.only_mine { self.user.as_ref().map(|u| u.id) } else { None };
         let q = if self.search.trim().is_empty() { None } else { Some(self.search.trim()) };
-        match self.api.list_portfolios(q, ilce, None, listing, None, status, owner) {
+        match self.api.list_portfolios(q, ilce, None, listing, None, status, owner, self.show_deleted) {
             Ok(list) => self.portfolios = list,
             Err(e) => self.set_error(e),
         }
@@ -307,9 +425,15 @@ impl App {
             Err(e) => self.set_error(e),
         }
     }
-    fn load_shifts(&mut self) {
-        match self.api.list_shifts() {
-            Ok(s) => self.shifts = s,
+    fn load_plans(&mut self) {
+        match self.api.list_shift_plans() {
+            Ok(p) => self.plans = p,
+            Err(e) => self.set_error(e),
+        }
+    }
+    fn load_attendance(&mut self) {
+        match self.api.list_attendance() {
+            Ok(a) => self.attendance = a,
             Err(e) => self.set_error(e),
         }
     }
@@ -319,7 +443,7 @@ impl App {
         }
     }
     fn load_crm(&mut self) {
-        match self.api.list_crm() {
+        match self.api.list_crm(self.show_deleted) {
             Ok(c) => self.crm = c,
             Err(e) => self.set_error(e),
         }
@@ -337,7 +461,7 @@ impl App {
             Screen::Welcome => self.load_portfolios(),
             Screen::Tasks => self.load_tasks(),
             Screen::Goals => self.load_goals(),
-            Screen::Shifts => self.load_shifts(),
+            Screen::Shifts => { self.load_plans(); self.load_attendance(); }
             Screen::Crm => self.load_crm(),
             Screen::Users => self.load_users(),
             Screen::Settings => self.load_settings(),
@@ -398,6 +522,31 @@ impl App {
 
     // ---------------- update ----------------
 
+    /// Türkçe karakter kümesini (ç ğ ı ö ş ü İ Ğ Ş) tam destekleyen font kurulumu.
+/// Roboto tüm metinlerde öncelikli kullanılır; emoji/ikon fontları yedekte kalır.
+fn install_turkish_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "roboto_regular".to_string(),
+        egui::FontData::from_static(include_bytes!("../../../assets/fonts/Roboto-Regular.ttf")),
+    );
+    fonts.font_data.insert(
+        "roboto_bold".to_string(),
+        egui::FontData::from_static(include_bytes!("../../../assets/fonts/Roboto-Bold.ttf")),
+    );
+
+    // Proportional ailesinde Roboto'yu en başa al (başlıklar Bold'la, gövde Regular'la)
+    let prop = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+    prop.insert(0, "roboto_bold".to_string());
+    prop.insert(0, "roboto_regular".to_string());
+
+    let mono = fonts.families.entry(egui::FontFamily::Monospace).or_default();
+    mono.push("roboto_regular".to_string());
+
+    ctx.set_fonts(fonts);
+}
+
+
     /// Ağ durumunu ve otomatik senkronizasyonu yönetir.
     fn tick_sync(&mut self, ctx: &egui::Context) {
         let t = ctx.input(|i| i.time);
@@ -429,6 +578,8 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_notifications(ctx);
         self.tick_sync(ctx);
+        self.handle_zoom_shortcuts(ctx);
+        self.handle_card_zoom(ctx);
 
         // Sürükle-bırak ile resim ekleme (portföy formunda)
         if self.screen == Screen::PortfolioForm {
@@ -464,7 +615,7 @@ impl eframe::App for App {
                         Screen::Tasks => self.tasks_screen(ui),
                         Screen::Goals => self.goals_screen(ui),
                         Screen::Shifts => self.shifts_screen(ui),
-                        Screen::Crm => self.crm_screen(ui),
+                        Screen::Crm => self.crm_screen(ui, ctx),
                         Screen::Users => self.users_screen(ui),
                         Screen::Settings => self.settings_screen(ui),
                         Screen::Profile => self.profile_screen(ui, ctx),
@@ -499,10 +650,8 @@ impl App {
                     ui.text_edit_singleline(&mut self.server_url);
                     ui.horizontal(|ui| {
                         if ui.button("🔍 Ağdaki Sunucuları Bul").clicked() {
-                            self.discovering = true;
                             self.discovered =
                                 crate::api::discover_servers(std::time::Duration::from_millis(1500));
-                            self.discovering = false;
                             if self.discovered.is_empty() {
                                 self.login_error = Some(
                                     "Ağda otomatik sunucu bulunamadı. IP adresini elle girebilirsiniz."
@@ -511,9 +660,6 @@ impl App {
                             } else {
                                 self.login_error = None;
                             }
-                        }
-                        if self.discovering {
-                            ui.spinner();
                         }
                     });
                     if !self.discovered.is_empty() {
@@ -537,7 +683,7 @@ impl App {
                         .clicked()
                         || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                     if submit {
-                        self.do_login();
+                        self.do_login(ui.ctx());
                     }
                     if let Some(e) = &self.login_error {
                         ui.add_space(6.0);
@@ -554,7 +700,7 @@ impl App {
         });
     }
 
-    fn do_login(&mut self) {
+    fn do_login(&mut self, ctx: &egui::Context) {
         self.login_error = None;
         self.api.set_base(&self.server_url);
         match self.api.login(self.login_username.trim(), &self.login_password) {
@@ -564,7 +710,10 @@ impl App {
                 self.login_password.clear();
                 self.load_all();
                 self.toast(format!("Hoş geldiniz, {}", auth.user.full_name), false);
+                // Yerel tercih kayıtlı değilse sunucu varsayılanlarını uygula
                 self.navigate(Screen::Welcome);
+                self.apply_server_ui_defaults(ctx);
+                self.apply_server_ui_defaults(ctx);
             }
             Err(e) => self.login_error = Some(e),
         }
@@ -628,9 +777,9 @@ impl App {
                 if self.is_admin() {
                     nav_button(ui, &mut target, self.screen, Screen::Crm, "👥  CRM Kayıtları");
                     nav_button(ui, &mut target, self.screen, Screen::Users, "🧑‍💼  Kullanıcılar");
-                    nav_button(ui, &mut target, self.screen, Screen::Settings, "⚙  Çıktı Ayarları");
                     ui.separator();
                 }
+                nav_button(ui, &mut target, self.screen, Screen::Settings, "⚙  Ayarlar");
                 nav_button(ui, &mut target, self.screen, Screen::Profile, "👤  Profilim");
                 ui.add_space(10.0);
                 ui.separator();
@@ -755,6 +904,10 @@ fn nav_button(ui: &mut egui::Ui, target: &mut Option<Screen>, current: Screen, t
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct ClientConfig {
     server_url: String,
+    #[serde(default)]
+    theme: String,
+    #[serde(default)]
+    zoom: f64,
 }
 
 fn config_file() -> PathBuf {
@@ -819,6 +972,13 @@ impl App {
             if prev != self.only_mine {
                 self.load_portfolios();
             }
+            if self.is_admin() {
+                let prevd = self.show_deleted;
+                ui.checkbox(&mut self.show_deleted, "🗑 Silinmişleri göster");
+                if prevd != self.show_deleted {
+                    self.load_portfolios();
+                }
+            }
             ui.separator();
             ui.selectable_value(&mut self.list_view, false, "▦ Görsel");
             ui.selectable_value(&mut self.list_view, true, "☰ Liste");
@@ -842,8 +1002,19 @@ impl App {
         });
     }
 
+    /// Ctrl + fare tekerleği ile kart boyutlandırma (vitrin ekranında).
+    fn handle_card_zoom(&mut self, ctx: &egui::Context) {
+        if self.screen != Screen::Welcome {
+            return;
+        }
+        let (ctrl, scroll_y) = ctx.input(|i| (i.modifiers.ctrl, i.smooth_scroll_delta.y));
+        if ctrl && scroll_y != 0.0 {
+            self.card_scale = (self.card_scale * (1.0 + scroll_y * 0.0012)).clamp(0.55, 2.5);
+        }
+    }
+
     fn portfolio_grid_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let card_w = 220.0;
+        let card_w = 220.0 * self.card_scale;
         let cols = ((ui.available_width() / (card_w + 12.0)).floor() as usize).max(1);
         let mut idx = 0;
         while idx < self.portfolios.len() {
@@ -861,42 +1032,84 @@ impl App {
         }
     }
 
+    /// Kapak resmini en-boy oranını bozmadan (cover) kırparak çizer.
+    fn draw_cover_image(painter: &egui::Painter, tex: &egui::TextureHandle, rect: egui::Rect) {
+        let ts = tex.size_vec2();
+        let a_img = ts.x / ts.y;
+        let a_rect = rect.width() / rect.height();
+        // Merkezden kırpma: kart hedef oranına uyan UV penceresi (cover)
+        let uv = if a_img > a_rect {
+            let cut = (1.0 - a_rect / a_img) * 0.5;
+            egui::Rect::from_min_max(egui::pos2(cut, 0.0), egui::pos2(1.0 - cut, 1.0))
+        } else {
+            let cut = (1.0 - a_img / a_rect) * 0.5;
+            egui::Rect::from_min_max(egui::pos2(0.0, cut), egui::pos2(1.0, 1.0 - cut))
+        };
+        painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
+    }
+
     fn portfolio_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, p: &Portfolio, w: f32) {
+        let inner_w = w - 14.0;
+        let img_h = (130.0 * self.card_scale).max(90.0);
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(w);
-            let cover = p.images.first().cloned();
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(w - 16.0, 130.0), egui::Sense::click());
-            let painter = ui.painter_at(rect);
-            painter.rect_filled(rect, 4.0, egui::Color32::from_gray(60));
-            if let Some(name) = &cover {
-                if let Some(tex) = self.texture(ctx, name) {
-                    painter.image(
-                        tex.id(),
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
+            ui.set_min_size(egui::vec2(w, img_h + 96.0 * self.card_scale));
+            ui.vertical(|ui| {
+                ui.set_width(inner_w);
+                let cover = p.images.first().cloned();
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(inner_w, img_h), egui::Sense::click());
+                let painter = ui.painter_at(rect);
+                painter.rect_filled(rect, 4.0, egui::Color32::from_gray(60));
+                if let Some(name) = &cover {
+                    if let Some(tex) = self.texture(ctx, name) {
+                        Self::draw_cover_image(&painter, &tex, rect);
+                    }
+                } else {
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Resim yok",
+                        egui::FontId::proportional(14.0 * self.card_scale),
+                        egui::Color32::GRAY,
                     );
                 }
-            } else {
-                painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Resim yok", egui::FontId::proportional(14.0), egui::Color32::GRAY);
-            }
-            if resp.clicked() {
-                self.detail_id = Some(p.id);
-                self.navigate(Screen::PortfolioDetail);
-            }
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(&p.title).strong());
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new(format!("{} {}", p.listing_type_label(), p.category_label())).small());
+                if resp.clicked() {
+                    self.detail_id = Some(p.id);
+                    self.navigate(Screen::PortfolioDetail);
+                }
+                ui.add_space(3.0);
+
+                // Başlık: tek satır, taşma "..." ile kırpılır
+                let mut title = egui::Label::new(egui::RichText::new(&p.title).strong().size(14.0 * self.card_scale));
+                title = title.truncate();
+                ui.add(title);
+                // Tür/kategori ve konum: tek satır, kırpılır
+                ui.add(egui::Label::new(
+                    egui::RichText::new(format!("{} • {} / {}", p.listing_type_label(), p.ilce, p.mahalle))
+                        .small(),
+                ).truncate());
+                let price = if p.price > 0.0 {
+                    format_price(p.price, &p.currency)
+                } else {
+                    "Fiyat yok".into()
+                };
+                ui.horizontal(|ui| {
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(price)
+                            .color(egui::Color32::from_rgb(46, 116, 181))
+                            .strong()
+                            .size(13.0 * self.card_scale),
+                    ).truncate());
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(p.status_label()).small().weak(),
+                    ).truncate());
+                    if p.is_deleted {
+                        ui.label(egui::RichText::new("🗑 silinmiş").small().color(egui::Color32::from_rgb(220, 80, 80)));
+                    }
+                });
             });
-            ui.label(format!("{} / {}", p.ilce, p.mahalle));
-            let price = if p.price > 0.0 {
-                format_price(p.price, &p.currency)
-            } else {
-                "Fiyat yok".into()
-            };
-            ui.label(egui::RichText::new(price).color(egui::Color32::from_rgb(46, 116, 181)).strong());
-            ui.label(egui::RichText::new(&p.status_label()).small().weak());
         });
     }
 
@@ -909,12 +1122,7 @@ impl App {
                     painter.rect_filled(rect, 4.0, egui::Color32::from_gray(60));
                     if let Some(name) = p.images.first() {
                         if let Some(tex) = self.texture(ctx, name) {
-                            painter.image(
-                                tex.id(),
-                                rect,
-                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                egui::Color32::WHITE,
-                            );
+                            Self::draw_cover_image(&painter, &tex, rect);
                         }
                     }
                     if resp.clicked() {
@@ -1152,9 +1360,58 @@ impl App {
         });
     }
 
+    fn digit_count(s: &str) -> usize {
+        s.chars().filter(|c| c.is_ascii_digit()).count()
+    }
+
+    /// Ayarlarda tanımlı kurallara göre formu doğrular; hata mesajı döndürür.
+    fn validate_portfolio_form(&self) -> Option<String> {
+        let r = &self.settings;
+        let title_len = self.form.title.trim().chars().count() as i64;
+        if title_len < r.val_title_min.max(1) {
+            return Some(format!(
+                "Başlık en az {} karakter olmalıdır",
+                r.val_title_min.max(1)
+            ));
+        }
+        if r.val_desc_min > 0 && (self.form.description.trim().chars().count() as i64) < r.val_desc_min {
+            return Some(format!(
+                "Açıklama en az {} karakter olmalıdır",
+                r.val_desc_min
+            ));
+        }
+        if self.form.price < r.val_price_min {
+            return Some(format!("Fiyat en az {} olmalıdır", r.val_price_min));
+        }
+        if self.form.area_m2 < r.val_area_min {
+            return Some(format!("Alan en az {} m² olmalıdır", r.val_area_min));
+        }
+        if self.form.owner_choice == 1 {
+            if r.val_phone_required && self.form.new_owner_phone.trim().is_empty() {
+                return Some("Taşınmaz sahibi telefonu zorunludur".to_string());
+            }
+            if r.val_phone_digits > 0
+                && !self.form.new_owner_phone.trim().is_empty()
+                && (Self::digit_count(&self.form.new_owner_phone) as i64) < r.val_phone_digits
+            {
+                return Some(format!(
+                    "Telefon en az {} rakam içermelidir",
+                    r.val_phone_digits
+                ));
+            }
+            if r.val_email_required && self.form.new_owner_email.trim().is_empty() {
+                return Some("Taşınmaz sahibi e-posta adresi zorunludur".to_string());
+            }
+            if !self.form.new_owner_email.trim().is_empty() && !self.form.new_owner_email.contains('@') {
+                return Some("Geçerli bir e-posta adresi giriniz".to_string());
+            }
+        }
+        None
+    }
+
     fn save_portfolio(&mut self) {
-        if self.form.title.trim().is_empty() {
-            self.set_error("Başlık zorunludur".into());
+        if let Some(msg) = self.validate_portfolio_form() {
+            self.set_error(msg);
             return;
         }
         let ilce = if self.form.ilce == 0 {
@@ -1361,7 +1618,16 @@ impl App {
                     if ui.button("🗑 Sil").clicked() {
                         match self.api.delete_portfolio(portfolio.id) {
                             Ok(_) => {
-                                self.toast("Portföy silindi", false);
+                                self.toast("Portföy silme komutu alındı (yönetici bilgilendirildi)", false);
+                                self.navigate(Screen::Welcome);
+                            }
+                            Err(e) => self.set_error(e),
+                        }
+                    }
+                    if self.is_admin() && portfolio.is_deleted && ui.button("♻ Geri Yükle").clicked() {
+                        match self.api.restore_portfolio(portfolio.id) {
+                            Ok(_) => {
+                                self.toast("Portföy geri yüklendi", false);
                                 self.navigate(Screen::Welcome);
                             }
                             Err(e) => self.set_error(e),
@@ -1434,16 +1700,17 @@ impl App {
             None
         };
         let result: Result<PathBuf, String> = if kind == "pdf" {
-            export::export_pdf(&dir.join(format!("{safe}.pdf")), p, owner.as_ref(), &agent, &self.settings)
+            let imgs: Vec<Vec<u8>> = p.images.iter().filter_map(|n| self.api.download_file(n).ok()).collect();
+            export::export_pdf(&dir.join(format!("{safe}.pdf")), p, owner.as_ref(), &agent, &self.settings, &imgs)
         } else {
-            let cover = p.images.first().and_then(|n| self.api.download_file(n).ok());
+            let imgs: Vec<Vec<u8>> = p.images.iter().filter_map(|n| self.api.download_file(n).ok()).collect();
             export::export_docx(
                 &dir.join(format!("{safe}.docx")),
                 p,
                 owner.as_ref(),
                 &agent,
                 &self.settings,
-                cover.as_deref(),
+                &imgs,
             )
         };
         match result {
@@ -1494,12 +1761,35 @@ impl App {
                     ui.label("Açıklama");
                     ui.add(egui::TextEdit::multiline(&mut self.task_form.description).desired_width(320.0).desired_rows(2));
                     ui.end_row();
-                    ui.label("Atanan");
-                    let mut opts = vec!["Tüm Ekip".to_string()];
-                    for u in &self.users {
-                        opts.push(if u.full_name.is_empty() { u.username.clone() } else { u.full_name.clone() });
+                    ui.label("Atanan Kişiler (çoklu seçim)");
+                    // Çoklu seçim: her personel için onay kutusu; hiçbiri seçilmezse tüm ekip
+                    if self.users.is_empty() {
+                        ui.label(egui::RichText::new("Kullanıcı listesi yükleniyor...").small().weak());
+                    } else {
+                        ui.vertical(|ui| {
+                            for u in self.users.clone() {
+                                let name = if u.full_name.is_empty() { u.username.clone() } else { u.full_name.clone() };
+                                let mut selected = self.task_assignees_sel.contains(&u.id);
+                                if ui.checkbox(&mut selected, format!("{}  ({})", name, u.username)).changed() {
+                                    if selected {
+                                        if !self.task_assignees_sel.contains(&u.id) {
+                                            self.task_assignees_sel.push(u.id);
+                                        }
+                                    } else {
+                                        self.task_assignees_sel.retain(|id| *id != u.id);
+                                    }
+                                }
+                            }
+                        });
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} kişi seçildi • hiçbiri seçilmezse tüm ekibe gider",
+                                self.task_assignees_sel.len()
+                            ))
+                            .small()
+                            .weak(),
+                        );
                     }
-                    combo_index(ui, "task_assignee", &mut self.task_form.assignee, &[], &opts.iter().map(|s| s.as_str()).collect::<Vec<_>>());
                     ui.end_row();
                     ui.label("Tarih / Saat");
                     ui.horizontal(|ui| {
@@ -1512,11 +1802,6 @@ impl App {
                     ui.end_row();
                 });
                 if ui.button("Görevi Ata").clicked() {
-                    let assigned_to = if self.task_form.assignee == 0 {
-                        None
-                    } else {
-                        self.users.get(self.task_form.assignee - 1).map(|u| u.id)
-                    };
                     let due = if self.task_form.due_date.trim().is_empty() {
                         String::new()
                     } else if self.task_form.due_time.trim().is_empty() {
@@ -1527,14 +1812,15 @@ impl App {
                     let input = TaskInput {
                         title: self.task_form.title.clone(),
                         description: self.task_form.description.clone(),
-                        assigned_to,
+                        assigned_to: self.task_assignees_sel.clone(),
                         due_at: due,
                         priority: PRIORITIES[self.task_form.priority.min(2)].to_string(),
                     };
                     match self.api.create_task(&input) {
                         Ok(_) => {
-                            self.toast("Görev atandı ve bildirim gönderildi", false);
+                            self.toast("Görev atandı ve bildirimler gönderildi", false);
                             self.task_form = TaskForm::default();
+                            self.task_assignees_sel.clear();
                             refresh = true;
                         }
                         Err(e) => self.set_error(e),
@@ -1696,131 +1982,442 @@ impl App {
     }
 
     fn shifts_screen(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Mesai Takibi");
+        ui.heading("Vardiya ve Mesai");
         ui.separator();
-        let mut refresh = false;
+
+        let tabs = [("📋 Vardiya Takvimi", 0usize), ("✅ Mesai Onay Listesi", 1usize)];
         ui.horizontal(|ui| {
-            if ui.button("🟢 Giriş Yap (Mesai Başlat)").clicked() {
-                match self.api.clock_in() {
-                    Ok(_) => { self.toast("Mesai başlatıldı", false); refresh = true; }
-                    Err(e) => self.set_error(e),
+            for (label, i) in tabs {
+                let admin_only = i == 1;
+                if admin_only && !self.is_admin() {
+                    continue;
                 }
-            }
-            if ui.button("🔴 Çıkış Yap (Mesai Bitir)").clicked() {
-                match self.api.clock_out() {
-                    Ok(_) => { self.toast("Mesai bitirildi", false); refresh = true; }
-                    Err(e) => self.set_error(e),
+                if ui.selectable_label(self.shift_tab == i, label).clicked() {
+                    self.shift_tab = i;
                 }
-            }
-            if ui.button("⟳ Yenile").clicked() {
-                refresh = true;
             }
         });
         ui.separator();
 
-        egui::Grid::new("shift_grid").num_columns(5).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
-            ui.label(egui::RichText::new("Personel").strong());
-            ui.label(egui::RichText::new("Giriş").strong());
-            ui.label(egui::RichText::new("Çıkış").strong());
-            ui.label(egui::RichText::new("Süre").strong());
-            ui.label(egui::RichText::new("Durum").strong());
-            ui.end_row();
-            for s in &self.shifts {
-                ui.label(&s.user_name);
-                ui.label(&s.clock_in);
-                ui.label(s.clock_out.clone().unwrap_or_else(|| "-".into()));
-                ui.label(shift_duration(&s.clock_in, s.clock_out.as_deref()));
-                ui.label(if s.clock_out.is_none() {
-                    egui::RichText::new("Açık").color(egui::Color32::from_rgb(60, 160, 90))
-                } else {
-                    egui::RichText::new("Kapalı").weak()
+        match self.shift_tab {
+            0 => self.shift_plans_tab(ui),
+            _ => self.shift_approval_tab(ui),
+        }
+    }
+
+    /// Salt-okunur vardiya takvimi: kullanıcılar kendi ve ekip arkadaşlarının
+    /// tanımlı mesai saatlerini görür; düzenleme yalnızca yöneticide.
+    fn shift_plans_tab(&mut self, ui: &mut egui::Ui) {
+        if self.is_admin() {
+            egui::CollapsingHeader::new("➕ Vardiya Planı Ata / Güncelle").show(ui, |ui| {
+                egui::Grid::new("plan_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                    ui.label("Personel *");
+                    let labels: Vec<String> = self
+                        .users
+                        .iter()
+                        .map(|u| if u.full_name.is_empty() { u.username.clone() } else { u.full_name.clone() })
+                        .collect();
+                    let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+                    combo_index(ui, "plan_user", &mut self.plan_form.user_idx, &[], &refs);
+                    ui.end_row();
+                    ui.label("Ay *");
+                    ui.add(egui::TextEdit::singleline(&mut self.plan_form.month).desired_width(120.0).hint_text("2026-11"));
+                    ui.end_row();
+                    ui.label("Aylık iş günü");
+                    ui.add(egui::DragValue::new(&mut self.plan_form.work_days).range(1..=31).suffix(" gün"));
+                    ui.end_row();
+                    ui.label("Günlük çalışma saati");
+                    ui.add(egui::DragValue::new(&mut self.plan_form.daily_hours).range(0.5..=16.0).speed(0.5).suffix(" sa"));
+                    ui.end_row();
+                    ui.label("Açılış / Kapanış saati");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.plan_form.start_time).desired_width(80.0).hint_text("09:00"));
+                        ui.label("—");
+                        ui.add(egui::TextEdit::singleline(&mut self.plan_form.end_time).desired_width(80.0).hint_text("18:00"));
+                    });
+                    ui.end_row();
+                    ui.label("Not");
+                    ui.add(egui::TextEdit::singleline(&mut self.plan_form.note).desired_width(240.0));
+                    ui.end_row();
                 });
+                if ui.button("Planı Kaydet").clicked() {
+                    if let Some(u) = self.users.get(self.plan_form.user_idx) {
+                        let input = ShiftPlanInput {
+                            user_id: u.id,
+                            month: self.plan_form.month.trim().to_string(),
+                            work_days: self.plan_form.work_days,
+                            daily_hours: self.plan_form.daily_hours,
+                            start_time: if self.plan_form.start_time.is_empty() { "09:00".into() } else { self.plan_form.start_time.clone() },
+                            end_time: if self.plan_form.end_time.is_empty() { "18:00".into() } else { self.plan_form.end_time.clone() },
+                            note: self.plan_form.note.clone(),
+                        };
+                        match self.api.upsert_shift_plan(&input) {
+                            Ok(_) => {
+                                self.toast("Vardiya planı kaydedildi", false);
+                                self.plan_form = ShiftPlanForm::default();
+                                self.load_plans();
+                            }
+                            Err(e) => self.set_error(e),
+                        }
+                    } else {
+                        self.set_error("Önce kullanıcı seçin".into());
+                    }
+                }
+            });
+            ui.add_space(6.0);
+        }
+
+        egui::Grid::new("plans_list").num_columns(7).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
+            for h in ["Personel", "Ay", "Aylık Gün", "Günlük Saat", "Açılış", "Kapanış", "Not"] {
+                ui.label(egui::RichText::new(h).strong());
+            }
+            ui.end_row();
+            for p in &self.plans {
+                ui.label(&p.user_name);
+                ui.label(&p.month);
+                ui.label(format!("{} gün", p.work_days));
+                ui.label(format!("{:.1} saat", p.daily_hours));
+                ui.label(&p.start_time);
+                ui.label(&p.end_time);
+                ui.label(egui::RichText::new(&p.note).small().weak());
                 ui.end_row();
             }
         });
-        if refresh {
-            self.load_shifts();
+        if self.plans.is_empty() {
+            ui.label(egui::RichText::new("Henüz vardiya planı tanımlanmadı.").small().weak());
+        }
+    }
+
+    /// Yönetici: gerçekleşen mesai gün/saat kaydı girer ve onaylar.
+    fn shift_approval_tab(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("➕ Mesai Kaydı Ekle (Gün + Saat)").show(ui, |ui| {
+            egui::Grid::new("att_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                ui.label("Personel *");
+                let labels: Vec<String> = self
+                    .users
+                    .iter()
+                    .map(|u| if u.full_name.is_empty() { u.username.clone() } else { u.full_name.clone() })
+                    .collect();
+                let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+                combo_index(ui, "att_user", &mut self.att_form.user_idx, &[], &refs);
+                ui.end_row();
+                ui.label("Tarih *");
+                ui.add(egui::TextEdit::singleline(&mut self.att_form.date).desired_width(120.0).hint_text("2026-11-08"));
+                ui.end_row();
+                ui.label("Çalışılan saat");
+                ui.add(egui::DragValue::new(&mut self.att_form.hours).range(0.0..=24.0).speed(0.5).suffix(" sa"));
+                ui.end_row();
+                ui.label("Not");
+                ui.add(egui::TextEdit::singleline(&mut self.att_form.note).desired_width(240.0));
+                ui.end_row();
+            });
+            if ui.button("Kaydı Ekle").clicked() {
+                if let Some(u) = self.users.get(self.att_form.user_idx) {
+                    let input = ShiftAttendanceInput {
+                        user_id: u.id,
+                        date: self.att_form.date.trim().to_string(),
+                        hours: self.att_form.hours,
+                        note: self.att_form.note.clone(),
+                    };
+                    match self.api.upsert_attendance(&input) {
+                        Ok(_) => {
+                            self.toast("Mesai kaydı eklendi", false);
+                            self.att_form = ShiftAttendanceForm::default();
+                            self.load_attendance();
+                        }
+                        Err(e) => self.set_error(e),
+                    }
+                } else {
+                    self.set_error("Önce kullanıcı seçin".into());
+                }
+            }
+        });
+        ui.separator();
+
+        ui.label(egui::RichText::new("Onay kutucuğunu işaretleyerek mesaiyi onaylayın:").strong());
+        let mut toggle: Option<i64> = None;
+        egui::Grid::new("att_list").num_columns(5).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
+            for h in ["Personel", "Tarih", "Saat", "Onay", "Not"] {
+                ui.label(egui::RichText::new(h).strong());
+            }
+            ui.end_row();
+            for a in &self.attendance {
+                ui.label(&a.user_name);
+                ui.label(&a.date);
+                ui.label(format!("{:.1} sa", a.hours));
+                let mut approved = a.approved;
+                if ui.checkbox(&mut approved, "").changed() {
+                    toggle = Some(a.id);
+                }
+                ui.label(egui::RichText::new(&a.note).small().weak());
+                ui.end_row();
+            }
+        });
+        if let Some(id) = toggle {
+            match self.api.toggle_attendance(id) {
+                Ok(_) => self.load_attendance(),
+                Err(e) => self.set_error(e),
+            }
+        }
+        if self.attendance.is_empty() {
+            ui.label(egui::RichText::new("Henüz mesai kaydı yok.").small().weak());
         }
     }
 
     // =====================================================================
     //  CRM / KULLANICILAR / AYARLAR / PROFİL
     // =====================================================================
-    fn crm_screen(&mut self, ui: &mut egui::Ui) {
+    fn crm_screen(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if !self.is_admin() {
             ui.label("Bu bölüm yalnızca yöneticiye açıktır.");
             return;
         }
-        ui.heading("CRM Kayıtları (Taşınmaz Sahipleri / Müşteriler)");
+        ui.horizontal(|ui| {
+            ui.heading("CRM Kayıtları (Taşınmaz Sahipleri / Müşteriler)");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let prevd = self.show_deleted;
+                ui.checkbox(&mut self.show_deleted, "🗑 Silinmişleri göster");
+                if prevd != self.show_deleted {
+                    self.load_crm();
+                }
+                ui.separator();
+                ui.selectable_value(&mut self.crm_list_view, false, "▦ Görsel");
+                ui.selectable_value(&mut self.crm_list_view, true, "☰ Liste");
+            });
+        });
         ui.separator();
         let mut refresh = false;
 
-        egui::CollapsingHeader::new("➕ Yeni CRM Kaydı").show(ui, |ui| {
-            egui::Grid::new("crm_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                ui.label("Ad Soyad *");
-                ui.add(egui::TextEdit::singleline(&mut self.crm_form.full_name).desired_width(300.0));
-                ui.end_row();
-                ui.label("Telefon");
-                ui.add(egui::TextEdit::singleline(&mut self.crm_form.phone).desired_width(300.0));
-                ui.end_row();
-                ui.label("E-posta");
-                ui.add(egui::TextEdit::singleline(&mut self.crm_form.email).desired_width(300.0));
-                ui.end_row();
-                ui.label("Tip");
-                ui.add(egui::TextEdit::singleline(&mut self.crm_form.owner_type).desired_width(300.0).hint_text("Sahip / Yetkili / Müşteri"));
-                ui.end_row();
-                ui.label("Adres");
-                ui.add(egui::TextEdit::singleline(&mut self.crm_form.address).desired_width(300.0));
-                ui.end_row();
-                ui.label("Notlar");
-                ui.add(egui::TextEdit::multiline(&mut self.crm_form.notes).desired_width(300.0).desired_rows(2));
-                ui.end_row();
+        // Kayıt / düzenleme formu
+        let editing = self.crm_form.edit_id.is_some();
+        let title = if editing { format!("✏ Düzenle: #{}", self.crm_form.edit_id.unwrap()) } else { "➕ Yeni CRM Kaydı".to_string() };
+        egui::CollapsingHeader::new(title).default_open(editing).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // Profil fotoğrafı (düzenleme modunda)
+                ui.vertical(|ui| {
+                    if let Some(photo) = self.crm_photo_texture(ctx) {
+                        ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(photo.id(), egui::vec2(84.0, 84.0)))
+                                .rounding(egui::Rounding::same(42.0)),
+                        );
+                    } else {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(84.0, 84.0), egui::Sense::hover());
+                        ui.painter_at(rect).rect_filled(rect, 42.0, egui::Color32::from_gray(70));
+                    }
+                    if editing && ui.small_button("Fotoğraf").clicked() {
+                        if let Some(files) = pick_files() {
+                            if let Some(f) = files.into_iter().next() {
+                                let id = self.crm_form.edit_id.unwrap();
+                                match self.api.upload_crm_photo(id, &f) {
+                                    Ok(rec) => {
+                                        if let Some(p) = &rec.photo {
+                                            self.textures.remove(p);
+                                        }
+                                        self.toast("Profil fotoğrafı güncellendi (256×256 kırpıldı)", false);
+                                        refresh = true;
+                                    }
+                                    Err(e) => self.set_error(e),
+                                }
+                            }
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                egui::Grid::new("crm_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                    ui.label("Ad Soyad *");
+                    ui.add(egui::TextEdit::singleline(&mut self.crm_form.full_name).desired_width(300.0));
+                    ui.end_row();
+                    ui.label("Telefon");
+                    ui.add(egui::TextEdit::singleline(&mut self.crm_form.phone).desired_width(300.0));
+                    ui.end_row();
+                    ui.label("E-posta");
+                    ui.add(egui::TextEdit::singleline(&mut self.crm_form.email).desired_width(300.0));
+                    ui.end_row();
+                    ui.label("Tip");
+                    ui.add(egui::TextEdit::singleline(&mut self.crm_form.owner_type).desired_width(300.0).hint_text("Sahip / Yetkili / Müşteri"));
+                    ui.end_row();
+                    ui.label("Adres");
+                    ui.add(egui::TextEdit::singleline(&mut self.crm_form.address).desired_width(300.0));
+                    ui.end_row();
+                    ui.label("Notlar");
+                    ui.add(egui::TextEdit::multiline(&mut self.crm_form.notes).desired_width(300.0).desired_rows(2));
+                    ui.end_row();
+                });
             });
-            if ui.button("Kaydet").clicked() {
-                let input = CrmInput {
-                    full_name: self.crm_form.full_name.clone(),
-                    phone: self.crm_form.phone.clone(),
-                    email: self.crm_form.email.clone(),
-                    address: self.crm_form.address.clone(),
-                    owner_type: if self.crm_form.owner_type.is_empty() { "Sahip".into() } else { self.crm_form.owner_type.clone() },
-                    notes: self.crm_form.notes.clone(),
-                };
-                match self.api.create_crm(&input) {
-                    Ok(_) => { self.toast("CRM kaydı eklendi", false); self.crm_form = CrmForm::default(); refresh = true; }
-                    Err(e) => self.set_error(e),
+            ui.horizontal(|ui| {
+                let label = if editing { "Değişiklikleri Kaydet" } else { "Kaydet" };
+                if ui.button(label).clicked() {
+                    if self.crm_form.full_name.trim().is_empty() {
+                        self.set_error("Ad Soyad zorunludur".into());
+                    } else {
+                        let input = CrmInput {
+                            full_name: self.crm_form.full_name.clone(),
+                            phone: self.crm_form.phone.clone(),
+                            email: self.crm_form.email.clone(),
+                            address: self.crm_form.address.clone(),
+                            owner_type: if self.crm_form.owner_type.is_empty() { "Sahip".into() } else { self.crm_form.owner_type.clone() },
+                            notes: self.crm_form.notes.clone(),
+                        };
+                        let result = match self.crm_form.edit_id {
+                            Some(id) => self.api.update_crm(id, &input).map(|_| ()),
+                            None => self.api.create_crm(&input).map(|_| ()),
+                        };
+                        match result {
+                            Ok(_) => {
+                                self.toast(if editing { "CRM kaydı güncellendi" } else { "CRM kaydı eklendi" }, false);
+                                self.crm_form = CrmForm::default();
+                                refresh = true;
+                            }
+                            Err(e) => self.set_error(e),
+                        }
+                    }
                 }
-            }
+                if editing && ui.button("İptal").clicked() {
+                    self.crm_form = CrmForm::default();
+                }
+            });
         });
         ui.separator();
 
-        let mut del: Option<i64> = None;
-        egui::Grid::new("crm_list").num_columns(6).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
-            ui.label(egui::RichText::new("Ad Soyad").strong());
-            ui.label(egui::RichText::new("Tip").strong());
-            ui.label(egui::RichText::new("Telefon").strong());
-            ui.label(egui::RichText::new("E-posta").strong());
-            ui.label(egui::RichText::new("Ekleyen / Tarih").strong());
-            ui.label("");
-            ui.end_row();
-            for c in &self.crm {
-                ui.label(&c.full_name);
-                ui.label(&c.owner_type);
-                ui.label(&c.phone);
-                ui.label(&c.email);
-                ui.label(egui::RichText::new(format!("{}\n{}", c.created_by_name, c.created_at)).small());
-                if ui.small_button("Sil").clicked() {
-                    del = Some(c.id);
+        let mut act: Option<(i64, bool)> = None; // (id, is_delete)
+        if self.crm_list_view {
+            // Görsel (thumbnail) görünüm — varsayılan
+            let card_w = 210.0;
+            let cols = ((ui.available_width() / (card_w + 10.0)).floor() as usize).max(1);
+            let mut idx = 0;
+            let crm_items = self.crm.clone();
+            while idx < crm_items.len() {
+                ui.horizontal(|ui| {
+                    for _ in 0..cols {
+                        if idx >= crm_items.len() { break; }
+                        let c = crm_items[idx].clone();
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_width(card_w);
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    if let Some(tex) = self.crm_card_texture(ctx, &c) {
+                                        ui.add(
+                                            egui::Image::new(egui::load::SizedTexture::new(tex.id(), egui::vec2(56.0, 56.0)))
+                                                .rounding(egui::Rounding::same(28.0)),
+                                        );
+                                    } else {
+                                        let (rect, _) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::hover());
+                                        ui.painter_at(rect).rect_filled(rect, 28.0, egui::Color32::from_gray(70));
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.add(egui::Label::new(egui::RichText::new(&c.full_name).strong()).truncate());
+                                        ui.add(egui::Label::new(egui::RichText::new(&c.owner_type).small().weak()).truncate());
+                                        ui.add(egui::Label::new(egui::RichText::new(&c.phone).small()).truncate());
+                                    });
+                                });
+                                ui.add(egui::Label::new(egui::RichText::new(&c.email).small().weak()).truncate());
+                                if c.is_deleted {
+                                    ui.label(egui::RichText::new("🗑 silinmiş").small().color(egui::Color32::from_rgb(220, 80, 80)));
+                                }
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Düzenle").clicked() {
+                                        self.crm_form = CrmForm {
+                                            edit_id: Some(c.id),
+                                            full_name: c.full_name.clone(),
+                                            phone: c.phone.clone(),
+                                            email: c.email.clone(),
+                                            address: c.address.clone(),
+                                            owner_type: c.owner_type.clone(),
+                                            notes: c.notes.clone(),
+                                        };
+                                    }
+                                    if !c.is_deleted && ui.small_button("Sil").clicked() {
+                                        act = Some((c.id, true));
+                                    }
+                                    if c.is_deleted && ui.small_button("♻ Geri Yükle").clicked() {
+                                        act = Some((c.id, false));
+                                    }
+                                });
+                            });
+                        });
+                        idx += 1;
+                    }
+                });
+                ui.add_space(4.0);
+            }
+        } else {
+            // Liste görünümü
+            egui::Grid::new("crm_list").num_columns(7).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+                for h in ["", "Ad Soyad", "Tip", "Telefon", "E-posta", "Ekleyen / Tarih", "İşlem"] {
+                    ui.label(egui::RichText::new(h).strong());
                 }
                 ui.end_row();
+                let crm_items = self.crm.clone();
+                for c in &crm_items {
+                    if let Some(tex) = self.crm_card_texture(ui.ctx(), c) {
+                        ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(tex.id(), egui::vec2(34.0, 34.0)))
+                                .rounding(egui::Rounding::same(17.0)),
+                        );
+                    } else {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
+                        ui.painter_at(rect).rect_filled(rect, 17.0, egui::Color32::from_gray(70));
+                    }
+                    let name = if c.is_deleted {
+                        egui::RichText::new(format!("{} 🗑", c.full_name)).strikethrough()
+                    } else {
+                        egui::RichText::new(&c.full_name)
+                    };
+                    ui.label(name);
+                    ui.label(&c.owner_type);
+                    ui.label(&c.phone);
+                    ui.label(&c.email);
+                    ui.label(egui::RichText::new(format!("{}\n{}", c.created_by_name, c.created_at)).small());
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Düzenle").clicked() {
+                            self.crm_form = CrmForm {
+                                edit_id: Some(c.id),
+                                full_name: c.full_name.clone(),
+                                phone: c.phone.clone(),
+                                email: c.email.clone(),
+                                address: c.address.clone(),
+                                owner_type: c.owner_type.clone(),
+                                notes: c.notes.clone(),
+                            };
+                        }
+                        if !c.is_deleted && ui.small_button("Sil").clicked() {
+                            act = Some((c.id, true));
+                        }
+                        if c.is_deleted && ui.small_button("♻").clicked() {
+                            act = Some((c.id, false));
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+        }
+        if let Some((id, is_delete)) = act {
+            let result = if is_delete { self.api.delete_crm(id) } else { self.api.restore_crm(id) };
+            match result {
+                Ok(_) => {
+                    self.toast(if is_delete { "CRM kaydı silme komutu aldı (yönetici bilgilendirildi)" } else { "CRM kaydı geri yüklendi" }, false);
+                    refresh = true;
+                }
+                Err(e) => self.set_error(e),
             }
-        });
-        if let Some(id) = del {
-            let _ = self.api.delete_crm(id);
-            refresh = true;
         }
         if refresh {
             self.load_crm();
         }
+    }
+
+    /// Düzenleme formundaki CRM fotoğrafının dokusu.
+    fn crm_photo_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let photo = self.crm_form.edit_id
+            .and_then(|id| self.crm.iter().find(|c| c.id == id))
+            .and_then(|c| c.photo.clone())?;
+        self.texture(ctx, &photo)
+    }
+
+    /// CRM kartındaki fotoğraf dokusu.
+    fn crm_card_texture(&mut self, ctx: &egui::Context, c: &CrmRecord) -> Option<egui::TextureHandle> {
+        let photo = c.photo.clone()?;
+        self.texture(ctx, &photo)
     }
 
     fn users_screen(&mut self, ui: &mut egui::Ui) {
@@ -1830,6 +2427,11 @@ impl App {
         }
         ui.heading("Kullanıcılar (Çalışanlar)");
         ui.separator();
+        self.users_manager_ui(ui);
+    }
+
+    /// Kullanıcı yönetimi (ayarlar panelindeki sekmeden de kullanılır).
+    fn users_manager_ui(&mut self, ui: &mut egui::Ui) {
         let mut refresh = false;
 
         egui::CollapsingHeader::new("➕ Yeni Kullanıcı").show(ui, |ui| {
@@ -1898,12 +2500,111 @@ impl App {
     }
 
     fn settings_screen(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Ayarlar Paneli");
+        ui.separator();
+
+        let tabs: [(SettingsTab, &str); 4] = [
+            (SettingsTab::View, "🎨 Görünüm"),
+            (SettingsTab::Output, "📄 Çıktı"),
+            (SettingsTab::Validation, "✅ Doğrulama"),
+            (SettingsTab::Users, "🧑‍💼 Kullanıcılar"),
+        ];
+
+        ui.horizontal(|ui| {
+            for (tab, label) in tabs {
+                let admin_only = !matches!(tab, SettingsTab::View);
+                if admin_only && !self.is_admin() {
+                    continue;
+                }
+                if ui
+                    .selectable_label(self.settings_tab == tab, label)
+                    .clicked()
+                {
+                    self.settings_tab = tab;
+                }
+            }
+        });
+        ui.separator();
+
+        match self.settings_tab {
+            SettingsTab::View => self.settings_view_tab(ui),
+            SettingsTab::Output => self.settings_output_tab(ui),
+            SettingsTab::Validation => self.settings_validation_tab(ui),
+            SettingsTab::Users => self.settings_users_tab(ui),
+        }
+    }
+
+    /// Görünüm sekmesi: tema ve ölçeklendirme (tüm kullanıcılara açık, yerel kayıtlı).
+    fn settings_view_tab(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.label(egui::RichText::new("Görünüm (bu bilgisayara özgü)").strong());
+        ui.label(
+            egui::RichText::new(
+                "Tema ve yakınlaştırma tercihi bu bilgisayarda saklanır; diğer kullanıcıları etkilemez.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(8.0);
+
+        ui.label("Tema:");
+        ui.horizontal(|ui| {
+            for (val, label) in [
+                ("dark", "🌙 Karanlık Tema"),
+                ("light", "☀️ Aydınlık Tema"),
+                ("system", "🖥 Sistem Tercihine Uy"),
+            ] {
+                if ui.selectable_label(self.theme == val, label).clicked() {
+                    self.theme = val.to_string();
+                    self.local_theme_set = true;
+                    self.apply_theme(&ctx);
+                    self.save_config();
+                }
+            }
+        });
+
+        ui.add_space(14.0);
+        ui.label("Yakınlaştırma / UI Ölçeği (tüm bileşenleri büyütür-küçültür):");
+        let mut z = self.zoom;
+        let resp = ui.add(
+            egui::Slider::new(&mut z, 0.6..=2.5)
+                .step_by(0.05)
+                .text(format!("{:.0}%", self.zoom * 100.0)),
+        );
+        if resp.changed() {
+            self.set_zoom(&ctx, z);
+        }
+        ui.horizontal(|ui| {
+            if ui.small_button("− Küçült").clicked() {
+                self.set_zoom(&ctx, self.zoom - 0.1);
+            }
+            if ui.small_button("+ Büyüt").clicked() {
+                self.set_zoom(&ctx, self.zoom + 0.1);
+            }
+            if ui.small_button("⟲ %100 Sıfırla").clicked() {
+                self.set_zoom(&ctx, 1.0);
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Kısayollar: Ctrl + (büyüt) • Ctrl − (küçült) • Ctrl 0 (sıfırla)")
+                .small()
+                .weak(),
+        );
+    }
+
+    /// Çıktı sekmesi (yalnızca yönetici).
+    fn settings_output_tab(&mut self, ui: &mut egui::Ui) {
         if !self.is_admin() {
-            ui.label("Bu bölüm yalnızca yöneticiye açıktır.");
+            ui.label("Bu sekme yalnızca yöneticiye açıktır.");
             return;
         }
-        ui.heading("Çıktı Ayarları");
-        ui.label(egui::RichText::new("PDF/DOCX çıktılarında ve paylaşımlarda hangi bilgilerin görüneceğini belirleyin.").small().weak());
+        ui.label(egui::RichText::new("Çıktı Ayarları").strong());
+        ui.label(
+            egui::RichText::new("PDF/DOCX çıktılarında ve paylaşımlarda hangi bilgilerin görüneceğini belirleyin.")
+                .small()
+                .weak(),
+        );
         ui.separator();
         let s = &mut self.settings;
         ui.checkbox(&mut s.show_name, "İsim / Yetkili bilgisi");
@@ -1918,7 +2619,39 @@ impl App {
         ui.add(egui::TextEdit::singleline(&mut s.header_text).desired_width(360.0));
         ui.label("Alt bilgi metni:");
         ui.add(egui::TextEdit::multiline(&mut s.footer_text).desired_width(360.0).desired_rows(2));
-        ui.add_space(10.0);
+
+        ui.add_space(14.0);
+        ui.label(egui::RichText::new("Yeni Kullanıcılar İçin Varsayılan Görünüm").strong());
+        ui.label(
+            egui::RichText::new("Bu bilgisayarda yerel tercih kaydetmemiş kullanıcılar bu ayarlarla başlar.")
+                .small()
+                .weak(),
+        );
+        egui::Grid::new("ui_defaults_grid").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+            ui.label("Varsayılan tema");
+            let mut theme_idx = match self.settings.default_theme.as_str() {
+                "dark" => 1,
+                "light" => 2,
+                _ => 0,
+            };
+            combo_index(ui, "def_theme", &mut theme_idx, &[], &["Sistem tercihi", "Karanlık", "Aydınlık"]);
+            self.settings.default_theme = match theme_idx {
+                1 => "dark".to_string(),
+                2 => "light".to_string(),
+                _ => "system".to_string(),
+            };
+            ui.end_row();
+            ui.label("Varsayılan ölçek");
+            let zoom_pct = format!("{:.0}%", self.settings.default_zoom * 100.0);
+            ui.add(
+                egui::Slider::new(&mut self.settings.default_zoom, 0.6..=2.5)
+                    .step_by(0.05)
+                    .text(zoom_pct),
+            );
+            ui.end_row();
+        });
+
+        ui.add_space(12.0);
         if ui.button("Ayarları Kaydet").clicked() {
             let settings = self.settings.clone();
             match self.api.update_settings(&settings) {
@@ -1938,6 +2671,65 @@ impl App {
         if ui.button("💾 Sunucu Yedeğini İndir (ZIP)").clicked() {
             self.download_backup();
         }
+    }
+
+    /// Doğrulama sekmesi (yalnızca yönetici): form girdi kuralları.
+    fn settings_validation_tab(&mut self, ui: &mut egui::Ui) {
+        if !self.is_admin() {
+            ui.label("Bu sekme yalnızca yöneticiye açıktır.");
+            return;
+        }
+        ui.label(egui::RichText::new("Form Doğrulama Kuralları (Validasyon)").strong());
+        ui.label(
+            egui::RichText::new(
+                "Portföy formunda zorunlu alanlar ve sınır değerler. Kurallar sunucuda saklanır ve tüm kullanıcılar için geçerlidir.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.separator();
+        egui::Grid::new("val_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+            ui.label("Başlık en az kaç karakter");
+            ui.add(egui::DragValue::new(&mut self.settings.val_title_min).range(1..=200));
+            ui.end_row();
+            ui.label("Açıklama en az kaç karakter (0 = zorunlu değil)");
+            ui.add(egui::DragValue::new(&mut self.settings.val_desc_min).range(0..=2000));
+            ui.end_row();
+            ui.label("En düşük fiyat");
+            ui.add(egui::DragValue::new(&mut self.settings.val_price_min).speed(1000.0).max_decimals(0));
+            ui.end_row();
+            ui.label("En düşük alan (m²)");
+            ui.add(egui::DragValue::new(&mut self.settings.val_area_min).speed(1.0).max_decimals(0));
+            ui.end_row();
+            ui.label("Telefonda en az kaç rakam (0 = kontrol yok)");
+            ui.add(egui::DragValue::new(&mut self.settings.val_phone_digits).range(0..=15));
+            ui.end_row();
+            ui.label("Sahip telefonu zorunlu olsun");
+            ui.checkbox(&mut self.settings.val_phone_required, "Zorunlu");
+            ui.end_row();
+            ui.label("Sahip e-postası zorunlu olsun");
+            ui.checkbox(&mut self.settings.val_email_required, "Zorunlu");
+            ui.end_row();
+        });
+        ui.add_space(12.0);
+        if ui.button("Doğrulama Kurallarını Kaydet").clicked() {
+            let settings = self.settings.clone();
+            match self.api.update_settings(&settings) {
+                Ok(_) => self.toast("Doğrulama kuralları kaydedildi", false),
+                Err(e) => self.set_error(e),
+            }
+        }
+    }
+
+    /// Kullanıcılar sekmesi (yalnızca yönetici).
+    fn settings_users_tab(&mut self, ui: &mut egui::Ui) {
+        if !self.is_admin() {
+            ui.label("Bu sekme yalnızca yöneticiye açıktır.");
+            return;
+        }
+        ui.label(egui::RichText::new("Kullanıcı Yönetimi ve Rol Atama").strong());
+        ui.separator();
+        self.users_manager_ui(ui);
     }
 
     fn download_backup(&mut self) {

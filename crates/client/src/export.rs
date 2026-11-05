@@ -142,12 +142,76 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 // PDF
 // =====================================================================
 
+/// Portföy resimlerini sayfaya ızgara (grid) düzeninde küçük resimler olarak ekler.
+const PDF_THUMB_W: f32 = 52.0; // mm
+const PDF_GAP: f32 = 6.0; // mm
+const PDF_COLS: usize = 3;
+
+fn add_image_grid_to_pdf(
+    doc: &printpdf::PdfDocumentReference,
+    page: printpdf::PdfPageIndex,
+    layer_idx: printpdf::PdfLayerIndex,
+    images: &[Vec<u8>],
+    mut y: f32,
+) -> Result<(), String> {
+    let mut col = 0usize;
+    let mut row_h = 0.0f32;
+    let mut cur_page = page;
+    let mut cur_layer_i = layer_idx;
+
+    for bytes in images {
+        let img = match printpdf::image_crate::load_from_memory(bytes) {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+        if iw == 0.0 || ih == 0.0 {
+            continue;
+        }
+        let h_mm = PDF_THUMB_W * ih / iw;
+        row_h = row_h.max(h_mm);
+
+        // Sayfa dolduysa yeni sayfa aç
+        if y - row_h < 20.0 {
+            let (p, l) = doc.add_page(printpdf::Mm(210.0), printpdf::Mm(297.0), "Katman");
+            cur_page = p;
+            cur_layer_i = l;
+            y = 280.0;
+        }
+
+        let x = 18.0 + (col % PDF_COLS) as f32 * (PDF_THUMB_W + PDF_GAP);
+        let image = printpdf::Image::from_dynamic_image(&img);
+        // dpi=72 => 1px = 1pt; ölçek = hedef_pt / px
+        let target_pt = PDF_THUMB_W * 72.0 / 25.4;
+        let scale = target_pt / iw;
+        image.add_to_layer(
+            doc.get_page(cur_page).get_layer(cur_layer_i),
+            printpdf::ImageTransform {
+                translate_x: Some(printpdf::Mm(x)),
+                translate_y: Some(printpdf::Mm(y - h_mm)),
+                rotate: None,
+                scale_x: Some(scale),
+                scale_y: Some(scale),
+                dpi: Some(72.0),
+            },
+        );
+
+        col += 1;
+        if col % PDF_COLS == 0 {
+            y -= row_h + PDF_GAP;
+            row_h = 0.0;
+        }
+    }
+    Ok(())
+}
+
 pub fn export_pdf(
     out_path: &Path,
     p: &Portfolio,
     owner: Option<&CrmRecord>,
     agent: &User,
     s: &OutputSettings,
+    images: &[Vec<u8>],
 ) -> Result<PathBuf, String> {
     use printpdf::*;
 
@@ -166,6 +230,7 @@ pub fn export_pdf(
         .map_err(|e| e.to_string())?;
     let layer_ref = doc.get_page(page).get_layer(layer);
 
+    let show_images = s.show_cover_image;
     let mut y = 280.0_f32;
     for (text, kind) in lines {
         let (size, use_bold) = match kind {
@@ -180,6 +245,16 @@ pub fn export_pdf(
         y -= size * 0.55 + 3.0;
         if y < 20.0 {
             break;
+        }
+    }
+
+    // Tüm portföy resimleri küçük resim ızgarası olarak eklenir
+    if show_images && !images.is_empty() {
+        y -= 8.0;
+        if y > 70.0 {
+            add_image_grid_to_pdf(&doc, page, layer, images, y)?;
+        } else {
+            add_image_grid_to_pdf(&doc, page, layer, images, 280.0)?;
         }
     }
 
@@ -200,33 +275,59 @@ pub fn export_docx(
     owner: Option<&CrmRecord>,
     agent: &User,
     s: &OutputSettings,
-    cover: Option<&[u8]>,
+    images: &[Vec<u8>],
 ) -> Result<PathBuf, String> {
     let lines = build_lines(p, owner, agent, s);
 
-    // Kapak resmini normalize JPEG olarak hazırla
-    let mut image_part: Option<(Vec<u8>, u32, u32)> = None;
+    // Tüm resimleri normalize JPEG olarak hazırla (ilk resim kapak)
+    let mut image_parts: Vec<Vec<u8>> = Vec::new();
+    let mut image_sizes: Vec<(u32, u32)> = Vec::new();
     if s.show_cover_image {
-        if let Some(bytes) = cover {
+        for bytes in images {
             if let Ok(img) = image::load_from_memory(bytes) {
                 let (w, h) = (img.width(), img.height());
                 let rgb = img.to_rgb8();
                 let mut buf: Vec<u8> = Vec::new();
                 let mut cursor = Cursor::new(&mut buf);
                 if rgb.write_to(&mut cursor, image::ImageFormat::Jpeg).is_ok() {
-                    image_part = Some((buf, w, h));
+                    image_parts.push(buf);
+                    image_sizes.push((w, h));
                 }
             }
         }
     }
 
-    let has_image = image_part.is_some();
+    let has_image = !image_parts.is_empty();
 
     // document.xml gövdesi
     let mut body = String::new();
-    if let Some((_, w, h)) = &image_part {
-        body.push_str(&drawing_paragraph(*w, *h));
+
+    // Kapak resmi (tam genişlik)
+    if let (Some(&(w, h)), Some(_)) = (image_sizes.first(), image_parts.first()) {
+        body.push_str(&drawing_paragraph(w, h, "rIdImg1"));
     }
+
+    // Diğer resimler: 2 sütunlu katalog ızgarası (tablo)
+    if image_parts.len() > 1 {
+        let mut cells = String::new();
+        for (i, &(w, h)) in image_sizes.iter().enumerate().skip(1) {
+            let rid = format!("rIdImg{}", i + 1);
+            cells.push_str(&drawing_cell(w, h, &rid));
+            // 2 sütun: her 2 hücreden sonra satır kapat
+            if (i - 1 + 1) % 2 == 0 {
+                body.push_str(&format!("<w:tbl><w:tblPr><w:tblW w:w=\"9638\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"4819\"/><w:gridCol w:w=\"4819\"/></w:tblGrid>{cells}</w:tbl>"));
+                cells.clear();
+                // tablolar arası boşluk
+                body.push_str(&paragraph("", 0));
+            }
+        }
+        // Tek kalan hücre varsa yine tablo yap (boş hücreyle)
+        if !cells.is_empty() {
+            cells.push_str("<w:tc><w:tcPr><w:tcW w:w=\"4819\" w:type=\"dxa\"/></w:tcPr><w:p/></w:tc>");
+            body.push_str(&format!("<w:tbl><w:tblPr><w:tblW w:w=\"9638\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"4819\"/><w:gridCol w:w=\"4819\"/></w:tblGrid>{cells}</w:tbl>"));
+        }
+    }
+
     for (text, kind) in &lines {
         body.push_str(&paragraph(text, *kind));
     }
@@ -259,14 +360,17 @@ pub fn export_docx(
 </Relationships>"#;
 
     let doc_rels = {
-        let image_rel = if has_image {
-            r#"<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/cover.jpeg"/>"#
-        } else {
-            ""
-        };
+        let mut image_rels = String::new();
+        for i in 0..image_parts.len() {
+            image_rels.push_str(&format!(
+                r#"<Relationship Id="rIdImg{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image{}.jpeg"/>"#,
+                i + 1,
+                i + 1
+            ));
+        }
         format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{image_rel}</Relationships>"#
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{image_rels}</Relationships>"#
         )
     };
 
@@ -276,7 +380,7 @@ pub fn export_docx(
     let opts: zip::write::SimpleFileOptions =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    let add = |zip: &mut zip::ZipWriter<std::fs::File>, name: &str, data: &[u8]| -> Result<(), String> {
+    let mut add = |zip: &mut zip::ZipWriter<std::fs::File>, name: &str, data: &[u8]| -> Result<(), String> {
         zip.start_file(name, opts).map_err(|e| e.to_string())?;
         zip.write_all(data).map_err(|e| e.to_string())?;
         Ok(())
@@ -286,8 +390,8 @@ pub fn export_docx(
     add(&mut zip, "_rels/.rels", rels.as_bytes())?;
     add(&mut zip, "word/document.xml", document_xml.as_bytes())?;
     add(&mut zip, "word/_rels/document.xml.rels", doc_rels.as_bytes())?;
-    if let Some((img, _, _)) = &image_part {
-        add(&mut zip, "word/media/cover.jpeg", img)?;
+    for (i, img) in image_parts.iter().enumerate() {
+        add(&mut zip, &format!("word/media/image{}.jpeg", i + 1), img)?;
     }
 
     zip.finish().map_err(|e| e.to_string())?;
@@ -315,14 +419,25 @@ fn paragraph(text: &str, kind: u8) -> String {
     )
 }
 
-fn drawing_paragraph(img_w: u32, img_h: u32) -> String {
+fn drawing_paragraph(img_w: u32, img_h: u32, rid: &str) -> String {
     // Sayfa genişliği ~15 cm olacak şekilde ölçekle (EMU: 914400 = 1 inç)
     const MAX_W_EMU: u64 = 5_400_000; // ~15 cm
     let ratio = if img_w == 0 { 1.0 } else { img_h as f64 / img_w as f64 };
     let cx = MAX_W_EMU;
     let cy = (MAX_W_EMU as f64 * ratio) as u64;
     format!(
-        r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="1" name="Kapak"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Kapak"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+        r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="1" name="Resim"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Resim"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+    )
+}
+
+/// Katalog ızgarası hücresi: tablo hücresi içinde ortalanmış küçük resim.
+fn drawing_cell(img_w: u32, img_h: u32, rid: &str) -> String {
+    const CELL_W_EMU: u64 = 2_700_000; // ~7.5 cm (hücre içi)
+    let ratio = if img_w == 0 { 1.0 } else { img_h as f64 / img_w as f64 };
+    let cx = CELL_W_EMU;
+    let cy = ((CELL_W_EMU as f64 * ratio) as u64).min(CELL_W_EMU); // aşırı uzun resimleri sınırla
+    format!(
+        r#"<w:tc><w:tcPr><w:tcW w:w="4819" w:type="dxa"/><w:vAlign w:val="center"/></w:tcPr><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="1" name="Resim"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Resim"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:tc>"#
     )
 }
 
@@ -381,6 +496,8 @@ mod tests {
             created_at: "2026-11-03 10:00:00".into(),
             updated_at: "2026-11-03 10:00:00".into(),
             images: Vec::new(),
+            is_deleted: false,
+            deleted_by_user_id: None,
         }
     }
 
@@ -403,10 +520,32 @@ mod tests {
         let dir = std::env::temp_dir().join("g360_export_test");
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("test.pdf");
-        export_pdf(&out, &sample_portfolio(), None, &sample_agent(), &OutputSettings::default()).unwrap();
+        export_pdf(&out, &sample_portfolio(), None, &sample_agent(), &OutputSettings::default(), &[]).unwrap();
         let data = std::fs::read(&out).unwrap();
         assert!(data.starts_with(b"%PDF"), "geçerli PDF başlığı yok");
         assert!(data.len() > 500);
+    }
+
+    #[test]
+    fn pdf_with_image_grid() {
+        let img = image::RgbImage::from_fn(8, 6, |x, y| image::Rgb([(x * 20) as u8, (y * 30) as u8, 90]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+
+        let dir = std::env::temp_dir().join("g360_export_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("grid.pdf");
+        export_pdf(&out, &sample_portfolio(), None, &sample_agent(), &OutputSettings::default(), &[buf.into_inner()]).unwrap();
+        let data = std::fs::read(&out).unwrap();
+        assert!(data.starts_with(b"%PDF"));
+        // Resim XObject olarak gömülmeli ve dosya belirgin şekilde büyümeli
+        let baseline = {
+            let out2 = dir.join("baseline.pdf");
+            export_pdf(&out2, &sample_portfolio(), None, &sample_agent(), &OutputSettings::default(), &[]).unwrap();
+            std::fs::read(&out2).unwrap().len()
+        };
+        assert!(data.windows(5).any(|w| w == b"Image"), "resim XObject yok");
+        assert!(data.len() > baseline + 100, "resim verisi gömülmedi ({} vs {})", data.len(), baseline);
     }
 
     #[test]
@@ -414,7 +553,7 @@ mod tests {
         let dir = std::env::temp_dir().join("g360_export_test");
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("test.docx");
-        export_docx(&out, &sample_portfolio(), None, &sample_agent(), &OutputSettings::default(), None).unwrap();
+        export_docx(&out, &sample_portfolio(), None, &sample_agent(), &OutputSettings::default(), &[]).unwrap();
         let data = std::fs::read(&out).unwrap();
         // DOCX bir ZIP'tir: PK imzası ile başlar
         assert!(data.starts_with(b"PK"), "geçerli DOCX (zip) başlığı yok");
@@ -432,12 +571,40 @@ mod tests {
         let dir = std::env::temp_dir().join("g360_export_test");
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("cover.docx");
-        export_docx(&out, &sample_portfolio(), None, &sample_agent(), &OutputSettings::default(), Some(&cover)).unwrap();
+        export_docx(&out, &sample_portfolio(), None, &sample_agent(), &OutputSettings::default(), &[cover]).unwrap();
 
         let file = std::fs::File::open(&out).unwrap();
         let mut zip = zip::ZipArchive::new(file).unwrap();
-        assert!(zip.by_name("word/media/cover.jpeg").is_ok(), "kapak resmi gömülmedi");
+        assert!(zip.by_name("word/media/image1.jpeg").is_ok(), "kapak resmi gömülmedi");
         assert!(zip.by_name("word/document.xml").is_ok());
+    }
+
+    #[test]
+    fn docx_gallery_grid() {
+        // 5 resim: 1 kapak + 4 galeri (2 satır tablo)
+        let mut imgs = Vec::new();
+        for k in 0..5u8 {
+            let img = image::RgbImage::from_fn(6, 6, |x, y| image::Rgb([k * 40, (x * 30) as u8, (y * 30) as u8]));
+            let mut buf = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+            imgs.push(buf.into_inner());
+        }
+        let dir = std::env::temp_dir().join("g360_export_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("gallery.docx");
+        export_docx(&out, &sample_portfolio(), None, &sample_agent(), &OutputSettings::default(), &imgs).unwrap();
+
+        let file = std::fs::File::open(&out).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        for i in 1..=5u32 {
+            assert!(zip.by_name(&format!("word/media/image{i}.jpeg")).is_ok(), "image{i} yok");
+        }
+        use std::io::Read;
+        let mut doc_bytes = Vec::new();
+        zip.by_name("word/document.xml").unwrap().read_to_end(&mut doc_bytes).unwrap();
+        let doc = String::from_utf8_lossy(&doc_bytes);
+        assert!(doc.contains("<w:tbl>"), "galeri tablosu yok");
+        assert!(doc.contains("rIdImg5"), "5. resim referansı yok");
     }
 
     #[test]

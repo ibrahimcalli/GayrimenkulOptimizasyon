@@ -17,5 +17,5 @@ chrono.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 open = "5"
-printpdf = "0.7"
+printpdf = { version = "0.7", features = ["embedded_images"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

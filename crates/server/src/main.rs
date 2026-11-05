@@ -74,12 +74,15 @@ async fn main() {
             "/api/portfolios/:id/images/:filename",
             delete(handlers::delete_portfolio_image),
         )
+        .route("/api/portfolios/:id/restore", post(handlers::restore_portfolio))
         // crm
         .route("/api/crm", get(handlers::list_crm).post(handlers::create_crm))
         .route(
             "/api/crm/:id",
             get(handlers::get_crm).put(handlers::update_crm).delete(handlers::delete_crm),
         )
+        .route("/api/crm/:id/restore", post(handlers::restore_crm))
+        .route("/api/crm/:id/photo", post(handlers::upload_crm_photo))
         // gorevler
         .route("/api/tasks", get(handlers::list_tasks).post(handlers::create_task))
         .route("/api/tasks/:id/toggle", post(handlers::toggle_task))
@@ -87,10 +90,12 @@ async fn main() {
         // hedefler
         .route("/api/goals", get(handlers::list_goals).post(handlers::create_goal))
         .route("/api/goals/:id", delete(handlers::delete_goal))
-        // mesai
-        .route("/api/shifts", get(handlers::list_shifts))
-        .route("/api/shifts/clock-in", post(handlers::clock_in))
-        .route("/api/shifts/clock-out", post(handlers::clock_out))
+        // vardiya planı ve mesai onayı
+        .route("/api/shift/plans", get(handlers::list_shift_plans))
+        .route("/api/shift/plan", post(handlers::upsert_shift_plan))
+        .route("/api/shift/attendance", get(handlers::list_attendance))
+        .route("/api/shift/attendance", post(handlers::upsert_attendance))
+        .route("/api/shift/attendance/:id/toggle-approve", post(handlers::toggle_attendance))
         // bildirim
         .route("/api/notifications", get(handlers::list_notifications))
         .route("/api/notifications/read-all", post(handlers::read_all_notifications))

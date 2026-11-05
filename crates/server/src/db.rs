@@ -23,6 +23,41 @@ pub fn new_token() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Mevcut veritabanına sonradan eklenen kolonları güvenli şekilde ekler.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let columns: [(&str, &str, &str); 15] = [
+        ("settings", "val_title_min", "INTEGER NOT NULL DEFAULT 3"),
+        ("settings", "val_phone_digits", "INTEGER NOT NULL DEFAULT 10"),
+        ("settings", "val_email_required", "INTEGER NOT NULL DEFAULT 0"),
+        ("settings", "val_phone_required", "INTEGER NOT NULL DEFAULT 0"),
+        ("settings", "val_desc_min", "INTEGER NOT NULL DEFAULT 0"),
+        ("settings", "val_price_min", "REAL NOT NULL DEFAULT 0"),
+        ("settings", "val_area_min", "REAL NOT NULL DEFAULT 0"),
+        ("settings", "default_theme", "TEXT NOT NULL DEFAULT 'system'"),
+        ("settings", "default_zoom", "REAL NOT NULL DEFAULT 1.0"),
+        ("crm", "photo", "TEXT"),
+        ("crm", "is_deleted", "INTEGER NOT NULL DEFAULT 0"),
+        ("crm", "deleted_by_user_id", "INTEGER"),
+        ("portfolios", "is_deleted", "INTEGER NOT NULL DEFAULT 0"),
+        ("portfolios", "deleted_by_user_id", "INTEGER"),
+        ("tasks", "is_deleted", "INTEGER NOT NULL DEFAULT 0"),
+    ];
+    for (table, name, ddl) in columns {
+        let exists: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if exists == 0 {
+            conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {ddl}"), [])?;
+            tracing::info!("{table} tablosuna kolon eklendi: {name}");
+        }
+    }
+    Ok(())
+}
+
 /// Veritabanı şemasını oluşturur ve varsayılan admin kullanıcısını ekler.
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -54,7 +89,10 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             owner_type TEXT NOT NULL DEFAULT 'Sahip',
             notes TEXT NOT NULL DEFAULT '',
             created_by INTEGER NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            photo TEXT,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            deleted_by_user_id INTEGER
         );
         CREATE TABLE IF NOT EXISTS portfolios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +119,9 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             owner_crm_id INTEGER,
             created_by INTEGER NOT NULL,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            deleted_by_user_id INTEGER
         );
         CREATE TABLE IF NOT EXISTS portfolio_images (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +138,33 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             due_at TEXT NOT NULL DEFAULT '',
             priority TEXT NOT NULL DEFAULT 'normal',
             done INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            deleted_by_user_id INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS task_assignees (
+            task_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            PRIMARY KEY (task_id, user_id)
+        );
+        CREATE TABLE IF NOT EXISTS shift_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            month TEXT NOT NULL,
+            work_days INTEGER NOT NULL DEFAULT 22,
+            daily_hours REAL NOT NULL DEFAULT 8,
+            start_time TEXT NOT NULL DEFAULT '09:00',
+            end_time TEXT NOT NULL DEFAULT '18:00',
+            note TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS shift_attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            hours REAL NOT NULL DEFAULT 0,
+            approved INTEGER NOT NULL DEFAULT 0,
+            approved_by INTEGER,
+            note TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS goals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,10 +203,22 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             show_description INTEGER NOT NULL DEFAULT 1,
             show_cover_image INTEGER NOT NULL DEFAULT 1,
             header_text TEXT NOT NULL DEFAULT 'GAYRİMENKUL360',
-            footer_text TEXT NOT NULL DEFAULT 'Bu tanıtım belgesi Gayrimenkul360 tarafından oluşturulmuştur.'
+            footer_text TEXT NOT NULL DEFAULT 'Bu tanıtım belgesi Gayrimenkul360 tarafından oluşturulmuştur.',
+            val_title_min INTEGER NOT NULL DEFAULT 3,
+            val_phone_digits INTEGER NOT NULL DEFAULT 10,
+            val_email_required INTEGER NOT NULL DEFAULT 0,
+            val_phone_required INTEGER NOT NULL DEFAULT 0,
+            val_desc_min INTEGER NOT NULL DEFAULT 0,
+            val_price_min REAL NOT NULL DEFAULT 0,
+            val_area_min REAL NOT NULL DEFAULT 0,
+            default_theme TEXT NOT NULL DEFAULT 'system',
+            default_zoom REAL NOT NULL DEFAULT 1.0
         );
         "#,
     )?;
+
+    // Eski veritabanlarında eksik kolonları ekle (göç)
+    migrate(conn)?;
 
     // Varsayılan ayarlar
     conn.execute(

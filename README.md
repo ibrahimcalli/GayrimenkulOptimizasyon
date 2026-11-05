@@ -89,6 +89,10 @@ Giriş ekranındaki "Sunucu Adresi" alanına sunucunun ağ adresini yazın (ör.
 - **Wi-Fi ve kablolu ağ desteği + sunucu otomatik bulma** (UDP broadcast)
 - Bağlantı durumu göstergesi ve karşılama ekranında otomatik senkronizasyon
 - Tek tıkla **sunucu yedeği** (veritabanı + resimler, ZIP)
+- **Ayarlar Paneli (sekmeli):** Görünüm, Çıktı, Doğrulama, Kullanıcılar
+- **Tema desteği:** Karanlık / Aydınlık / Sistem (yerel olarak kalıcı)
+- **Dinamik ölçeklendirme:** Ctrl +/−/0 kısayolları ve ayarlardan %60–%250 UI zoom
+- **Form doğrulama kuralları:** yönetici tanımlar, sunucuda saklanır, istemci+sunucu uygular
 
 ## Proje Yapısı
 

@@ -10,7 +10,7 @@ use common::*;
 
 use crate::auth::{bad_request, internal, not_found, unauthorized, AdminUser, CurrentUser};
 use crate::db::{hash_password, new_salt, new_token, now};
-use crate::state::{load_images, map_crm, map_portfolio, map_settings, map_shift, map_task, map_user, AppState};
+use crate::state::{load_images, map_attendance, map_crm, map_portfolio, map_settings, map_shift_plan, map_task, map_user, AppState};
 
 type ApiResult<T> = std::result::Result<T, Response>;
 
@@ -216,11 +216,12 @@ pub struct PortfolioQuery {
     pub category: Option<String>,
     pub status: Option<String>,
     pub owner: Option<i64>,
+    pub show_deleted: Option<i64>,
 }
 
 pub async fn list_portfolios(
     State(state): State<AppState>,
-    _u: CurrentUser,
+    CurrentUser(user): CurrentUser,
     Query(query): Query<PortfolioQuery>,
 ) -> ApiResult<Json<Vec<Portfolio>>> {
     let conn = state.db.lock().unwrap();
@@ -229,6 +230,12 @@ pub async fn list_portfolios(
          FROM portfolios p LEFT JOIN users u ON u.id = p.created_by WHERE 1=1",
     );
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    // Mantıksal silme: silinenler yalnızca admin + açık istekle görünür
+    let show_deleted = query.show_deleted.unwrap_or(0) == 1 && user.role == Role::Admin;
+    if !show_deleted {
+        sql.push_str(" AND p.is_deleted = 0");
+    }
 
     if let Some(q) = query.q.filter(|s| !s.trim().is_empty()) {
         sql.push_str(" AND (p.title LIKE ?1 OR p.description LIKE ?1 OR p.address LIKE ?1)");
@@ -284,6 +291,47 @@ pub async fn get_portfolio(
     Ok(Json(p))
 }
 
+/// Ayarlarda tanımlı doğrulama kurallarını portföy girdisine uygular.
+fn validate_portfolio_input(conn: &rusqlite::Connection, input: &PortfolioInput) -> ApiResult<()> {
+    let rules = conn
+        .query_row("SELECT * FROM settings WHERE id = 1", [], map_settings)
+        .unwrap_or_default();
+
+    if (input.title.trim().chars().count() as i64) < rules.val_title_min {
+        return Err(bad_request(&format!(
+            "Başlık en az {} karakter olmalıdır",
+            rules.val_title_min
+        )));
+    }
+    if rules.val_desc_min > 0 && (input.description.trim().chars().count() as i64) < rules.val_desc_min {
+        return Err(bad_request(&format!(
+            "Açıklama en az {} karakter olmalıdır",
+            rules.val_desc_min
+        )));
+    }
+    if input.price < rules.val_price_min {
+        return Err(bad_request(&format!(
+            "Fiyat en az {} olmalıdır",
+            format_num(rules.val_price_min)
+        )));
+    }
+    if input.area_m2 < rules.val_area_min {
+        return Err(bad_request(&format!(
+            "Alan en az {} m² olmalıdır",
+            format_num(rules.val_area_min)
+        )));
+    }
+    Ok(())
+}
+
+fn format_num(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
 fn insert_portfolio(conn: &rusqlite::Connection, user: &User, input: &PortfolioInput, id: Option<i64>) -> ApiResult<i64> {
     let ts = now();
     if let Some(pid) = id {
@@ -328,6 +376,7 @@ pub async fn create_portfolio(
         return Err(bad_request("Başlık zorunludur"));
     }
     let conn = state.db.lock().unwrap();
+    validate_portfolio_input(&conn, &input)?;
     let id = insert_portfolio(&conn, &user, &input, None)?;
     let p = conn
         .query_row(
@@ -353,6 +402,7 @@ pub async fn update_portfolio(
     if owner != user.id && user.role != Role::Admin {
         return Err(unauthorized("Bu portföyü düzenleme yetkiniz yok"));
     }
+    validate_portfolio_input(&conn, &input)?;
     insert_portfolio(&conn, &user, &input, Some(id))?;
     let mut p = conn
         .query_row(
@@ -364,6 +414,31 @@ pub async fn update_portfolio(
         .map_err(|e| internal(&e.to_string()))?;
     p.images = load_images(&conn, p.id);
     Ok(Json(p))
+}
+
+/// Mantıksal silme (soft-delete): kayıt gizlenir, veritabanında kalır.
+/// Silme bildirimi tüm yöneticilere düşer (silen kullanıcı hariç).
+fn notify_admins_of_delete(conn: &rusqlite::Connection, actor: &User, kind: &str, subject: &str) {
+    let admins: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id FROM users WHERE role='admin' AND active=1").unwrap();
+        stmt.query_map([], |r| r.get(0)).map(|it| it.filter_map(|r| r.ok()).collect()).unwrap_or_default()
+    };
+    let title = format!("{subject} silme komutu aldı");
+    let body = format!(
+        "{} kaydı {} ({}) kullanıcısı tarafından silindi. Yönetici panelinden geri yüklenebilir.",
+        kind, actor.full_name, actor.username
+    );
+    for admin_id in admins {
+        if admin_id == actor.id {
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO notifications (user_id, title, body, kind, read, created_at)
+             VALUES (?1, ?2, ?3, 'delete', 0, ?4)",
+            params![admin_id, title, body, now()],
+        )
+        .ok();
+    }
 }
 
 pub async fn delete_portfolio(
@@ -378,13 +453,26 @@ pub async fn delete_portfolio(
     if owner != user.id && user.role != Role::Admin {
         return Err(unauthorized("Bu portföyü silme yetkiniz yok"));
     }
-    let files = load_images(&conn, id);
-    conn.execute("DELETE FROM portfolio_images WHERE portfolio_id = ?1", [id]).ok();
-    conn.execute("DELETE FROM portfolios WHERE id = ?1", [id]).ok();
-    drop(conn);
-    for f in files {
-        let _ = std::fs::remove_file(state.upload_dir.join(f));
-    }
+    conn.execute(
+        "UPDATE portfolios SET is_deleted = 1, deleted_by_user_id = ?1 WHERE id = ?2",
+        params![user.id, id],
+    )
+    .map_err(|e| internal(&e.to_string()))?;
+    notify_admins_of_delete(&conn, &user, "Portföy", "Portföy");
+    Ok(Json(serde_json::json!({ "ok": true, "soft_deleted": true })))
+}
+
+pub async fn restore_portfolio(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let conn = state.db.lock().unwrap();
+    conn.execute(
+        "UPDATE portfolios SET is_deleted = 0, deleted_by_user_id = NULL WHERE id = ?1",
+        [id],
+    )
+    .map_err(|e| internal(&e.to_string()))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -465,14 +553,27 @@ pub async fn delete_portfolio_image(
 // CRM  (liste/okuma/güncelleme/silme sadece admin)
 // =====================================================================
 
-pub async fn list_crm(State(state): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Vec<CrmRecord>>> {
+#[derive(serde::Deserialize, Default)]
+pub struct CrmQuery {
+    pub show_deleted: Option<i64>,
+}
+
+pub async fn list_crm(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Query(q): Query<CrmQuery>,
+) -> ApiResult<Json<Vec<CrmRecord>>> {
     let conn = state.db.lock().unwrap();
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.*, u.full_name AS created_by_name FROM crm c
-             LEFT JOIN users u ON u.id = c.created_by ORDER BY c.created_at DESC, c.id DESC",
-        )
-        .map_err(|e| internal(&e.to_string()))?;
+    let show_deleted = q.show_deleted.unwrap_or(0) == 1;
+    let sql = if show_deleted {
+        "SELECT c.*, u.full_name AS created_by_name FROM crm c
+         LEFT JOIN users u ON u.id = c.created_by ORDER BY c.is_deleted, c.created_at DESC, c.id DESC"
+    } else {
+        "SELECT c.*, u.full_name AS created_by_name FROM crm c
+         LEFT JOIN users u ON u.id = c.created_by WHERE c.is_deleted = 0
+         ORDER BY c.created_at DESC, c.id DESC"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| internal(&e.to_string()))?;
     let list = stmt
         .query_map([], map_crm)
         .map_err(|e| internal(&e.to_string()))?
@@ -545,10 +646,77 @@ pub async fn update_crm(
     Ok(Json(rec))
 }
 
-pub async fn delete_crm(State(state): State<AppState>, _admin: AdminUser, Path(id): Path<i64>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn delete_crm(State(state): State<AppState>, CurrentUser(user): CurrentUser, Path(id): Path<i64>) -> ApiResult<Json<serde_json::Value>> {
     let conn = state.db.lock().unwrap();
-    conn.execute("DELETE FROM crm WHERE id = ?1", [id]).map_err(|e| internal(&e.to_string()))?;
+    conn.execute(
+        "UPDATE crm SET is_deleted = 1, deleted_by_user_id = ?1 WHERE id = ?2",
+        params![user.id, id],
+    )
+    .map_err(|e| internal(&e.to_string()))?;
+    notify_admins_of_delete(&conn, &user, "CRM", "CRM kaydı");
+    Ok(Json(serde_json::json!({ "ok": true, "soft_deleted": true })))
+}
+
+pub async fn restore_crm(State(state): State<AppState>, _admin: AdminUser, Path(id): Path<i64>) -> ApiResult<Json<serde_json::Value>> {
+    let conn = state.db.lock().unwrap();
+    conn.execute(
+        "UPDATE crm SET is_deleted = 0, deleted_by_user_id = NULL WHERE id = ?1",
+        [id],
+    )
+    .map_err(|e| internal(&e.to_string()))?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// CRM (müşteri/sahip) profil fotoğrafı yükler; kare kırpma + 256px standardizasyon.
+pub async fn upload_crm_photo(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<i64>,
+    mut multipart: Multipart,
+) -> ApiResult<Json<CrmRecord>> {
+    let filename = {
+        let mut saved: Option<String> = None;
+        while let Some(field) = multipart.next_field().await.map_err(|e| bad_request(&e.to_string()))? {
+            let data = field.bytes().await.map_err(|e| bad_request(&e.to_string()))?;
+            if data.is_empty() {
+                continue;
+            }
+            let img = image::load_from_memory(&data)
+                .map_err(|_| bad_request("Geçerli bir resim dosyası değil"))?;
+            // Merkezden kare kırpma
+            let (w, h) = (img.width(), img.height());
+            let side = w.min(h);
+            let x = (w - side) / 2;
+            let y = (h - side) / 2;
+            let cropped = img.crop_imm(x, y, side, side);
+            let resized = cropped.resize_exact(256, 256, image::imageops::FilterType::Lanczos3);
+            let filename = format!("{}.jpg", uuid::Uuid::new_v4());
+            let path = state.upload_dir.join(&filename);
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            resized
+                .write_to(&mut cursor, image::ImageFormat::Jpeg)
+                .map_err(|e| internal(&e.to_string()))?;
+            std::fs::write(&path, cursor.into_inner()).map_err(|e| internal(&e.to_string()))?;
+            saved = Some(filename);
+            break;
+        }
+        match saved {
+            Some(f) => f,
+            None => return Err(bad_request("Dosya bulunamadı")),
+        }
+    };
+    let conn = state.db.lock().unwrap();
+    conn.execute("UPDATE crm SET photo = ?1 WHERE id = ?2", params![filename, id])
+        .map_err(|e| internal(&e.to_string()))?;
+    let rec = conn
+        .query_row(
+            "SELECT c.*, u.full_name AS created_by_name FROM crm c
+             LEFT JOIN users u ON u.id = c.created_by WHERE c.id = ?1",
+            [id],
+            map_crm,
+        )
+        .map_err(|_| not_found("Kayıt bulunamadı"))?;
+    Ok(Json(rec))
 }
 
 // =====================================================================
@@ -557,19 +725,38 @@ pub async fn delete_crm(State(state): State<AppState>, _admin: AdminUser, Path(i
 
 pub async fn list_tasks(State(state): State<AppState>, CurrentUser(user): CurrentUser) -> ApiResult<Json<Vec<Task>>> {
     let conn = state.db.lock().unwrap();
-    let sql = "SELECT t.*, a.full_name AS assigned_to_name, b.full_name AS assigned_by_name
+    let sql = "SELECT t.*, NULL AS assigned_to_name, b.full_name AS assigned_by_name
                FROM tasks t
-               LEFT JOIN users a ON a.id = t.assigned_to
                LEFT JOIN users b ON b.id = t.assigned_by
-               WHERE ?1 = 1 OR t.assigned_to = ?2 OR t.assigned_to IS NULL OR t.assigned_by = ?2
+               WHERE t.is_deleted = 0 AND (?1 = 1 OR t.assigned_to IS NULL OR t.assigned_by = ?2
+                     OR EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?2))
                ORDER BY t.done, t.due_at, t.id DESC";
     let is_admin = (user.role == Role::Admin) as i64;
     let mut stmt = conn.prepare(sql).map_err(|e| internal(&e.to_string()))?;
-    let list = stmt
+    let mut list: Vec<Task> = stmt
         .query_map(params![is_admin, user.id], map_task)
         .map_err(|e| internal(&e.to_string()))?
         .filter_map(|r| r.ok())
         .collect();
+
+    // Çoklu atama bilgilerini doldur
+    for t in list.iter_mut() {
+        let mut ids_stmt = conn
+            .prepare(
+                "SELECT ta.user_id, COALESCE(u.full_name, u.username) FROM task_assignees ta
+                 LEFT JOIN users u ON u.id = ta.user_id WHERE ta.task_id = ?1",
+            )
+            .map_err(|e| internal(&e.to_string()))?;
+        let rows = ids_stmt
+            .query_map([t.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| internal(&e.to_string()))?;
+        let pairs: Vec<(i64, String)> = rows.filter_map(|r| r.ok()).collect();
+        t.assigned_to_ids = pairs.iter().map(|(id, _)| *id).collect();
+        if !pairs.is_empty() {
+            t.assigned_to_name = pairs.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ");
+            t.assigned_to = Some(t.assigned_to_ids[0]);
+        }
+    }
     Ok(Json(list))
 }
 
@@ -582,17 +769,23 @@ pub async fn create_task(
         return Err(bad_request("Görev başlığı zorunludur"));
     }
     let conn = state.db.lock().unwrap();
+    let first = input.assigned_to.first().copied();
     conn.execute(
         "INSERT INTO tasks (title, description, assigned_to, assigned_by, due_at, priority, done, created_at)
          VALUES (?1,?2,?3,?4,?5,?6,0,?7)",
-        params![input.title, input.description, input.assigned_to, user.id, input.due_at, input.priority, now()],
+        params![input.title, input.description, first, user.id, input.due_at, input.priority, now()],
     )
     .map_err(|e| internal(&e.to_string()))?;
     let id = conn.last_insert_rowid();
 
-    // Atanan kişiye bildirim gönder
-    if let Some(assignee) = input.assigned_to {
-        if assignee != user.id {
+    // Çoklu atama + her atanan kişiye bildirim
+    for assignee in &input.assigned_to {
+        conn.execute(
+            "INSERT OR IGNORE INTO task_assignees (task_id, user_id) VALUES (?1, ?2)",
+            params![id, assignee],
+        )
+        .map_err(|e| internal(&e.to_string()))?;
+        if *assignee != user.id {
             let body = if input.due_at.trim().is_empty() {
                 format!("{} tarafından yeni görev atandı.", user.full_name)
             } else {
@@ -607,15 +800,36 @@ pub async fn create_task(
         }
     }
 
-    let task = conn
+    let mut task = conn
         .query_row(
-            "SELECT t.*, a.full_name AS assigned_to_name, b.full_name AS assigned_by_name FROM tasks t
-             LEFT JOIN users a ON a.id = t.assigned_to LEFT JOIN users b ON b.id = t.assigned_by WHERE t.id = ?1",
+            "SELECT t.*, NULL AS assigned_to_name, b.full_name AS assigned_by_name FROM tasks t
+             LEFT JOIN users b ON b.id = t.assigned_by WHERE t.id = ?1",
             [id],
             map_task,
         )
         .map_err(|e| internal(&e.to_string()))?;
+    fill_assignees(&conn, &mut task);
     Ok(Json(task))
+}
+
+/// Görevin çoklu atama kimlerini ve adlarını doldurur.
+fn fill_assignees(conn: &rusqlite::Connection, t: &mut Task) {
+    let mut ids_stmt = conn
+        .prepare(
+            "SELECT ta.user_id, COALESCE(u.full_name, u.username) FROM task_assignees ta
+             LEFT JOIN users u ON u.id = ta.user_id WHERE ta.task_id = ?1",
+        )
+        .ok();
+    if let Some(stmt) = ids_stmt.as_mut() {
+        if let Ok(rows) = stmt.query_map([t.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
+            let pairs: Vec<(i64, String)> = rows.filter_map(|r| r.ok()).collect();
+            if !pairs.is_empty() {
+                t.assigned_to_ids = pairs.iter().map(|(id, _)| *id).collect();
+                t.assigned_to_name = pairs.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ");
+                t.assigned_to = Some(t.assigned_to_ids[0]);
+            }
+        }
+    }
 }
 
 pub async fn toggle_task(State(state): State<AppState>, _u: CurrentUser, Path(id): Path<i64>) -> ApiResult<Json<serde_json::Value>> {
@@ -633,8 +847,13 @@ pub async fn delete_task(State(state): State<AppState>, CurrentUser(user): Curre
     if by != user.id && user.role != Role::Admin {
         return Err(unauthorized("Bu görevi silme yetkiniz yok"));
     }
-    conn.execute("DELETE FROM tasks WHERE id = ?1", [id]).map_err(|e| internal(&e.to_string()))?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    conn.execute(
+        "UPDATE tasks SET is_deleted = 1, deleted_by_user_id = ?1 WHERE id = ?2",
+        params![user.id, id],
+    )
+    .map_err(|e| internal(&e.to_string()))?;
+    notify_admins_of_delete(&conn, &user, "Görev", "Görev");
+    Ok(Json(serde_json::json!({ "ok": true, "soft_deleted": true })))
 }
 
 // =====================================================================
@@ -764,70 +983,147 @@ pub async fn delete_goal(State(state): State<AppState>, _admin: AdminUser, Path(
 }
 
 // =====================================================================
-// MESAI
+// VARDİYA PLANI VE MESAİ ONAYI
 // =====================================================================
 
-pub async fn list_shifts(State(state): State<AppState>, CurrentUser(user): CurrentUser) -> ApiResult<Json<Vec<Shift>>> {
+/// Tüm vardiya planları (salt-okunur; kullanıcılar ekip planını görebilir).
+pub async fn list_shift_plans(State(state): State<AppState>, _u: CurrentUser) -> ApiResult<Json<Vec<ShiftPlan>>> {
     let conn = state.db.lock().unwrap();
-    let sql = "SELECT s.*, u.full_name AS user_name FROM shifts s
-               LEFT JOIN users u ON u.id = s.user_id
-               WHERE ?1 = 1 OR s.user_id = ?2
-               ORDER BY s.clock_in DESC, s.id DESC";
-    let is_admin = (user.role == Role::Admin) as i64;
-    let mut stmt = conn.prepare(sql).map_err(|e| internal(&e.to_string()))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.*, u.full_name AS user_name FROM shift_plans s
+             LEFT JOIN users u ON u.id = s.user_id
+             ORDER BY s.month DESC, u.full_name COLLATE NOCASE",
+        )
+        .map_err(|e| internal(&e.to_string()))?;
     let list = stmt
-        .query_map(params![is_admin, user.id], map_shift)
+        .query_map([], map_shift_plan)
         .map_err(|e| internal(&e.to_string()))?
         .filter_map(|r| r.ok())
         .collect();
     Ok(Json(list))
 }
 
-pub async fn clock_in(State(state): State<AppState>, CurrentUser(user): CurrentUser) -> ApiResult<Json<Shift>> {
+/// Yönetici personel için aylık/haftalık vardiya planı atar (aynı ay için günceller).
+pub async fn upsert_shift_plan(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Json(input): Json<ShiftPlanInput>,
+) -> ApiResult<Json<ShiftPlan>> {
+    if input.month.trim().is_empty() {
+        return Err(bad_request("Ay zorunludur (örn. 2026-11)"));
+    }
     let conn = state.db.lock().unwrap();
-    let open: Option<i64> = conn
+    conn.execute(
+        "DELETE FROM shift_plans WHERE user_id = ?1 AND month = ?2",
+        params![input.user_id, input.month],
+    )
+    .map_err(|e| internal(&e.to_string()))?;
+    conn.execute(
+        "INSERT INTO shift_plans (user_id, month, work_days, daily_hours, start_time, end_time, note)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![input.user_id, input.month, input.work_days, input.daily_hours, input.start_time, input.end_time, input.note],
+    )
+    .map_err(|e| internal(&e.to_string()))?;
+    let id = conn.last_insert_rowid();
+    let plan = conn
         .query_row(
-            "SELECT id FROM shifts WHERE user_id = ?1 AND clock_out IS NULL ORDER BY id DESC LIMIT 1",
-            [user.id],
+            "SELECT s.*, u.full_name AS user_name FROM shift_plans s
+             LEFT JOIN users u ON u.id = s.user_id WHERE s.id = ?1",
+            [id],
+            map_shift_plan,
+        )
+        .map_err(|e| internal(&e.to_string()))?;
+    Ok(Json(plan))
+}
+
+/// Mesai kayıtları: danışman yalnızca kendi kayıtlarını, admin tümünü görür.
+pub async fn list_attendance(State(state): State<AppState>, CurrentUser(user): CurrentUser) -> ApiResult<Json<Vec<ShiftAttendance>>> {
+    let conn = state.db.lock().unwrap();
+    let is_admin = user.role == Role::Admin;
+    let sql = if is_admin {
+        "SELECT a.*, u.full_name AS user_name FROM shift_attendance a
+         LEFT JOIN users u ON u.id = a.user_id ORDER BY a.date DESC, a.id DESC LIMIT 500"
+    } else {
+        "SELECT a.*, u.full_name AS user_name FROM shift_attendance a
+         LEFT JOIN users u ON u.id = a.user_id WHERE a.user_id = ?1
+         ORDER BY a.date DESC, a.id DESC LIMIT 500"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| internal(&e.to_string()))?;
+    let list = if is_admin {
+        stmt.query_map([], map_attendance)
+    } else {
+        stmt.query_map([user.id], map_attendance)
+    }
+    .map_err(|e| internal(&e.to_string()))?
+    .filter_map(|r| r.ok())
+    .collect();
+    Ok(Json(list))
+}
+
+/// Yönetici gerçekleşen mesai kaydı girer (gün + saat).
+pub async fn upsert_attendance(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Json(input): Json<ShiftAttendanceInput>,
+) -> ApiResult<Json<ShiftAttendance>> {
+    if input.date.trim().is_empty() {
+        return Err(bad_request("Tarih zorunludur (YYYY-MM-DD)"));
+    }
+    let conn = state.db.lock().unwrap();
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM shift_attendance WHERE user_id = ?1 AND date = ?2",
+            params![input.user_id, input.date],
             |r| r.get(0),
         )
         .optional()
         .map_err(|e| internal(&e.to_string()))?;
-    if open.is_some() {
-        return Err(bad_request("Zaten açık bir mesai kaydınız var"));
-    }
-    conn.execute("INSERT INTO shifts (user_id, clock_in, note) VALUES (?1, ?2, '')", params![user.id, now()])
-        .map_err(|e| internal(&e.to_string()))?;
-    let id = conn.last_insert_rowid();
-    let s = conn
+    let id = match existing {
+        Some(id) => {
+            conn.execute(
+                "UPDATE shift_attendance SET hours = ?1, note = ?2 WHERE id = ?3",
+                params![input.hours, input.note, id],
+            )
+            .map_err(|e| internal(&e.to_string()))?;
+            id
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO shift_attendance (user_id, date, hours, approved, note) VALUES (?1,?2,?3,0,?4)",
+                params![input.user_id, input.date, input.hours, input.note],
+            )
+            .map_err(|e| internal(&e.to_string()))?;
+            conn.last_insert_rowid()
+        }
+    };
+    let rec = conn
         .query_row(
-            "SELECT s.*, u.full_name AS user_name FROM shifts s LEFT JOIN users u ON u.id = s.user_id WHERE s.id = ?1",
+            "SELECT a.*, u.full_name AS user_name FROM shift_attendance a
+             LEFT JOIN users u ON u.id = a.user_id WHERE a.id = ?1",
             [id],
-            map_shift,
+            map_attendance,
         )
         .map_err(|e| internal(&e.to_string()))?;
-    Ok(Json(s))
+    Ok(Json(rec))
 }
 
-pub async fn clock_out(State(state): State<AppState>, CurrentUser(user): CurrentUser) -> ApiResult<Json<Shift>> {
+/// Yönetici mesai kaydını onaylar / onayı kaldırır.
+pub async fn toggle_attendance(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
     let conn = state.db.lock().unwrap();
-    let id: i64 = conn
-        .query_row(
-            "SELECT id FROM shifts WHERE user_id = ?1 AND clock_out IS NULL ORDER BY id DESC LIMIT 1",
-            [user.id],
-            |r| r.get(0),
-        )
-        .map_err(|_| bad_request("Açık mesai kaydı bulunamadı"))?;
-    conn.execute("UPDATE shifts SET clock_out = ?1 WHERE id = ?2", params![now(), id])
-        .map_err(|e| internal(&e.to_string()))?;
-    let s = conn
-        .query_row(
-            "SELECT s.*, u.full_name AS user_name FROM shifts s LEFT JOIN users u ON u.id = s.user_id WHERE s.id = ?1",
-            [id],
-            map_shift,
-        )
-        .map_err(|e| internal(&e.to_string()))?;
-    Ok(Json(s))
+    conn.execute(
+        "UPDATE shift_attendance
+         SET approved = CASE approved WHEN 1 THEN 0 ELSE 1 END,
+             approved_by = CASE approved WHEN 1 THEN NULL ELSE ?1 END
+         WHERE id = ?2",
+        params![admin.0.id, id],
+    )
+    .map_err(|e| internal(&e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // =====================================================================
@@ -884,10 +1180,15 @@ pub async fn update_settings(
     let conn = state.db.lock().unwrap();
     conn.execute(
         "UPDATE settings SET show_name=?1, show_phone=?2, show_email=?3, show_price=?4, show_address=?5,
-         show_description=?6, show_cover_image=?7, header_text=?8, footer_text=?9 WHERE id=1",
+         show_description=?6, show_cover_image=?7, header_text=?8, footer_text=?9,
+         val_title_min=?10, val_phone_digits=?11, val_email_required=?12, val_phone_required=?13,
+         val_desc_min=?14, val_price_min=?15, val_area_min=?16, default_theme=?17, default_zoom=?18 WHERE id=1",
         params![
             s.show_name as i64, s.show_phone as i64, s.show_email as i64, s.show_price as i64,
-            s.show_address as i64, s.show_description as i64, s.show_cover_image as i64, s.header_text, s.footer_text
+            s.show_address as i64, s.show_description as i64, s.show_cover_image as i64,
+            s.header_text, s.footer_text,
+            s.val_title_min, s.val_phone_digits, s.val_email_required as i64, s.val_phone_required as i64,
+            s.val_desc_min, s.val_price_min, s.val_area_min, s.default_theme, s.default_zoom
         ],
     )
     .map_err(|e| internal(&e.to_string()))?;

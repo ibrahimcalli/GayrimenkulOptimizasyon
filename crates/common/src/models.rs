@@ -228,6 +228,10 @@ pub struct Portfolio {
     pub updated_at: String,
     #[serde(default)]
     pub images: Vec<String>,
+    #[serde(default)]
+    pub is_deleted: bool,
+    #[serde(default)]
+    pub deleted_by_user_id: Option<Id>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,6 +273,10 @@ pub struct CrmRecord {
     pub created_by: Id,
     pub created_by_name: String,
     pub created_at: String,
+    #[serde(default)]
+    pub photo: Option<String>,
+    #[serde(default)]
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,19 +298,23 @@ pub struct Task {
     pub description: String,
     pub assigned_to: Option<Id>,
     pub assigned_to_name: String,
+    #[serde(default)]
+    pub assigned_to_ids: Vec<Id>,
     pub assigned_by: Id,
     pub assigned_by_name: String,
     pub due_at: String,
     pub priority: String,
     pub done: bool,
     pub created_at: String,
+    #[serde(default)]
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskInput {
     pub title: String,
     pub description: String,
-    pub assigned_to: Option<Id>,
+    pub assigned_to: Vec<Id>,
     pub due_at: String,
     pub priority: String,
 }
@@ -335,15 +347,49 @@ pub struct GoalInput {
     pub period_end: String,
 }
 
-// ---------------- Mesai ----------------
+// ---------------- Vardiya Planı ve Mesai Onay ----------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Shift {
+pub struct ShiftPlan {
     pub id: Id,
     pub user_id: Id,
     pub user_name: String,
-    pub clock_in: String,
-    pub clock_out: Option<String>,
+    pub month: String, // YYYY-MM
+    pub work_days: i64,
+    pub daily_hours: f64,
+    pub start_time: String,
+    pub end_time: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShiftPlanInput {
+    pub user_id: Id,
+    pub month: String,
+    pub work_days: i64,
+    pub daily_hours: f64,
+    pub start_time: String,
+    pub end_time: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ShiftAttendance {
+    pub id: Id,
+    pub user_id: Id,
+    pub user_name: String,
+    pub date: String, // YYYY-MM-DD
+    pub hours: f64,
+    pub approved: bool,
+    pub approved_by: Option<Id>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShiftAttendanceInput {
+    pub user_id: Id,
+    pub date: String,
+    pub hours: f64,
     pub note: String,
 }
 
@@ -374,7 +420,32 @@ pub struct OutputSettings {
     pub show_cover_image: bool,
     pub header_text: String,
     pub footer_text: String,
+    // --- Form doğrulama kuralları (admin tarafından yönetilir) ---
+    #[serde(default = "d_three")]
+    pub val_title_min: i64,
+    #[serde(default = "d_ten")]
+    pub val_phone_digits: i64,
+    #[serde(default)]
+    pub val_email_required: bool,
+    #[serde(default)]
+    pub val_phone_required: bool,
+    #[serde(default)]
+    pub val_desc_min: i64,
+    #[serde(default)]
+    pub val_price_min: f64,
+    #[serde(default)]
+    pub val_area_min: f64,
+    // --- Varsayılan görünüm (yeni istemciler için) ---
+    #[serde(default = "d_system")]
+    pub default_theme: String,
+    #[serde(default = "d_one_f")]
+    pub default_zoom: f64,
 }
+
+fn d_three() -> i64 { 3 }
+fn d_ten() -> i64 { 10 }
+fn d_system() -> String { "system".to_string() }
+fn d_one_f() -> f64 { 1.0 }
 
 impl Default for OutputSettings {
     fn default() -> Self {
@@ -389,6 +460,15 @@ impl Default for OutputSettings {
             show_cover_image: true,
             header_text: "GAYRİMENKUL360".to_string(),
             footer_text: "Bu tanıtım belgesi Gayrimenkul360 tarafından oluşturulmuştur.".to_string(),
+            val_title_min: 3,
+            val_phone_digits: 10,
+            val_email_required: false,
+            val_phone_required: false,
+            val_desc_min: 0,
+            val_price_min: 0.0,
+            val_area_min: 0.0,
+            default_theme: "system".to_string(),
+            default_zoom: 1.0,
         }
     }
 }

@@ -156,7 +156,7 @@ impl Api {
     }
 
     // ---------------- portfolio ----------------
-    pub fn list_portfolios(&self, q: Option<&str>, ilce: Option<&str>, mahalle: Option<&str>, listing: Option<&str>, category: Option<&str>, status: Option<&str>, owner: Option<i64>) -> ApiResult<Vec<Portfolio>> {
+    pub fn list_portfolios(&self, q: Option<&str>, ilce: Option<&str>, mahalle: Option<&str>, listing: Option<&str>, category: Option<&str>, status: Option<&str>, owner: Option<i64>, show_deleted: bool) -> ApiResult<Vec<Portfolio>> {
         let mut req = self.req(Method::GET, "/api/portfolios");
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(v) = q.filter(|s| !s.is_empty()) { params.push(("q", v.into())); }
@@ -166,6 +166,7 @@ impl Api {
         if let Some(v) = category.filter(|s| !s.is_empty()) { params.push(("category", v.into())); }
         if let Some(v) = status.filter(|s| !s.is_empty()) { params.push(("status", v.into())); }
         if let Some(v) = owner { params.push(("owner", v.to_string())); }
+        if show_deleted { params.push(("show_deleted", "1".into())); }
         if !params.is_empty() { req = req.query(&params); }
         Self::handle(req.send().map_err(net_err)?)
     }
@@ -189,6 +190,10 @@ impl Api {
 
     pub fn delete_portfolio(&self, id: i64) -> ApiResult<()> {
         Self::handle_empty(self.req(Method::DELETE, &format!("/api/portfolios/{id}")).send().map_err(net_err)?)
+    }
+
+    pub fn restore_portfolio(&self, id: i64) -> ApiResult<()> {
+        Self::handle_empty(self.req(Method::POST, &format!("/api/portfolios/{id}/restore")).send().map_err(net_err)?)
     }
 
     pub fn upload_portfolio_images(&self, id: i64, paths: &[std::path::PathBuf]) -> ApiResult<Vec<String>> {
@@ -215,8 +220,12 @@ impl Api {
     }
 
     // ---------------- crm ----------------
-    pub fn list_crm(&self) -> ApiResult<Vec<CrmRecord>> {
-        Self::handle(self.req(Method::GET, "/api/crm").send().map_err(net_err)?)
+    pub fn list_crm(&self, show_deleted: bool) -> ApiResult<Vec<CrmRecord>> {
+        let mut req = self.req(Method::GET, "/api/crm");
+        if show_deleted {
+            req = req.query(&[("show_deleted", "1")]);
+        }
+        Self::handle(req.send().map_err(net_err)?)
     }
     pub fn create_crm(&self, r: &CrmInput) -> ApiResult<CrmRecord> {
         Self::handle(self.req(Method::POST, "/api/crm").json(r).send().map_err(net_err)?)
@@ -226,6 +235,18 @@ impl Api {
     }
     pub fn delete_crm(&self, id: i64) -> ApiResult<()> {
         Self::handle_empty(self.req(Method::DELETE, &format!("/api/crm/{id}")).send().map_err(net_err)?)
+    }
+    pub fn restore_crm(&self, id: i64) -> ApiResult<()> {
+        Self::handle_empty(self.req(Method::POST, &format!("/api/crm/{id}/restore")).send().map_err(net_err)?)
+    }
+    pub fn upload_crm_photo(&self, id: i64, path: &Path) -> ApiResult<CrmRecord> {
+        let form = file_form("file", path)?;
+        Self::handle(
+            self.req(Method::POST, &format!("/api/crm/{id}/photo"))
+                .multipart(form)
+                .send()
+                .map_err(net_err)?,
+        )
     }
 
     // ---------------- tasks ----------------
@@ -253,15 +274,25 @@ impl Api {
         Self::handle_empty(self.req(Method::DELETE, &format!("/api/goals/{id}")).send().map_err(net_err)?)
     }
 
-    // ---------------- shifts ----------------
-    pub fn list_shifts(&self) -> ApiResult<Vec<Shift>> {
-        Self::handle(self.req(Method::GET, "/api/shifts").send().map_err(net_err)?)
+    // ---------------- vardiya planı / mesai onay ----------------
+    pub fn list_shift_plans(&self) -> ApiResult<Vec<ShiftPlan>> {
+        Self::handle(self.req(Method::GET, "/api/shift/plans").send().map_err(net_err)?)
     }
-    pub fn clock_in(&self) -> ApiResult<Shift> {
-        Self::handle(self.req(Method::POST, "/api/shifts/clock-in").send().map_err(net_err)?)
+    pub fn upsert_shift_plan(&self, r: &ShiftPlanInput) -> ApiResult<ShiftPlan> {
+        Self::handle(self.req(Method::POST, "/api/shift/plan").json(r).send().map_err(net_err)?)
     }
-    pub fn clock_out(&self) -> ApiResult<Shift> {
-        Self::handle(self.req(Method::POST, "/api/shifts/clock-out").send().map_err(net_err)?)
+    pub fn list_attendance(&self) -> ApiResult<Vec<ShiftAttendance>> {
+        Self::handle(self.req(Method::GET, "/api/shift/attendance").send().map_err(net_err)?)
+    }
+    pub fn upsert_attendance(&self, r: &ShiftAttendanceInput) -> ApiResult<ShiftAttendance> {
+        Self::handle(self.req(Method::POST, "/api/shift/attendance").json(r).send().map_err(net_err)?)
+    }
+    pub fn toggle_attendance(&self, id: i64) -> ApiResult<()> {
+        Self::handle_empty(
+            self.req(Method::POST, &format!("/api/shift/attendance/{id}/toggle-approve"))
+                .send()
+                .map_err(net_err)?,
+        )
     }
 
     // ---------------- notifications ----------------

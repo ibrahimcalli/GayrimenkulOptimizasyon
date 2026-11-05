@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use common::{CrmRecord, OutputSettings, Portfolio, Role, Shift, Task, User};
+use common::{CrmRecord, OutputSettings, Portfolio, Role, ShiftAttendance, ShiftPlan, Task, User};
 use rusqlite::{Connection, Row};
 
 #[derive(Clone)]
@@ -49,6 +49,8 @@ pub fn map_crm(row: &Row) -> rusqlite::Result<CrmRecord> {
         created_by: row.get("created_by")?,
         created_by_name: row.get::<_, Option<String>>("created_by_name")?.unwrap_or_default(),
         created_at: row.get("created_at")?,
+        photo: row.get("photo")?,
+        is_deleted: row.get::<_, i64>("is_deleted").unwrap_or(0) != 0,
     })
 }
 
@@ -81,6 +83,8 @@ pub fn map_portfolio(row: &Row) -> rusqlite::Result<Portfolio> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         images: Vec::new(),
+        is_deleted: row.get::<_, i64>("is_deleted").unwrap_or(0) != 0,
+        deleted_by_user_id: row.get("deleted_by_user_id").unwrap_or(None),
     })
 }
 
@@ -91,22 +95,40 @@ pub fn map_task(row: &Row) -> rusqlite::Result<Task> {
         description: row.get("description")?,
         assigned_to: row.get("assigned_to")?,
         assigned_to_name: row.get::<_, Option<String>>("assigned_to_name")?.unwrap_or_default(),
+        assigned_to_ids: Vec::new(),
         assigned_by: row.get("assigned_by")?,
         assigned_by_name: row.get::<_, Option<String>>("assigned_by_name")?.unwrap_or_default(),
         due_at: row.get("due_at")?,
         priority: row.get("priority")?,
         done: row.get::<_, i64>("done")? != 0,
         created_at: row.get("created_at")?,
+        is_deleted: row.get::<_, i64>("is_deleted").unwrap_or(0) != 0,
     })
 }
 
-pub fn map_shift(row: &Row) -> rusqlite::Result<Shift> {
-    Ok(Shift {
+pub fn map_shift_plan(row: &Row) -> rusqlite::Result<ShiftPlan> {
+    Ok(ShiftPlan {
         id: row.get("id")?,
         user_id: row.get("user_id")?,
-        user_name: row.get("user_name")?,
-        clock_in: row.get("clock_in")?,
-        clock_out: row.get("clock_out")?,
+        user_name: row.get::<_, Option<String>>("user_name")?.unwrap_or_default(),
+        month: row.get("month")?,
+        work_days: row.get("work_days")?,
+        daily_hours: row.get("daily_hours")?,
+        start_time: row.get("start_time")?,
+        end_time: row.get("end_time")?,
+        note: row.get("note")?,
+    })
+}
+
+pub fn map_attendance(row: &Row) -> rusqlite::Result<ShiftAttendance> {
+    Ok(ShiftAttendance {
+        id: row.get("id")?,
+        user_id: row.get("user_id")?,
+        user_name: row.get::<_, Option<String>>("user_name")?.unwrap_or_default(),
+        date: row.get("date")?,
+        hours: row.get("hours")?,
+        approved: row.get::<_, i64>("approved")? != 0,
+        approved_by: row.get("approved_by")?,
         note: row.get("note")?,
     })
 }
@@ -123,6 +145,15 @@ pub fn map_settings(row: &Row) -> rusqlite::Result<OutputSettings> {
         show_cover_image: row.get::<_, i64>("show_cover_image")? != 0,
         header_text: row.get("header_text")?,
         footer_text: row.get("footer_text")?,
+        val_title_min: row.get("val_title_min")?,
+        val_phone_digits: row.get("val_phone_digits")?,
+        val_email_required: row.get::<_, i64>("val_email_required")? != 0,
+        val_phone_required: row.get::<_, i64>("val_phone_required")? != 0,
+        val_desc_min: row.get("val_desc_min")?,
+        val_price_min: row.get("val_price_min")?,
+        val_area_min: row.get("val_area_min")?,
+        default_theme: row.get("default_theme")?,
+        default_zoom: row.get("default_zoom")?,
     })
 }
 
