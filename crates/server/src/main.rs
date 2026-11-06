@@ -126,13 +126,15 @@ async fn main() {
 /// Ağdaki istemcilerin sunucuyu otomatik bulabilmesi için UDP keşif servisini başlatır.
 /// Hem kablolu LAN hem de Wi-Fi üzerinden çalışır.
 fn start_discovery(http_port: u16, name: String) {
-    use common::discovery::{DiscoveryReply, REQUEST, UDP_PORT};
+    use common::discovery::{DiscoveryReply, REQUEST, UDP_PORT, UDP_PORT_ALT};
+    // HTTP portu 8085 (keşif portu) ile çakışıyorsa keşfi yedek porta kaydır
+    let udp_port = if http_port == UDP_PORT { UDP_PORT_ALT } else { UDP_PORT };
     std::thread::spawn(move || {
-        let sock = match std::net::UdpSocket::bind(("0.0.0.0", UDP_PORT)) {
+        let sock = match std::net::UdpSocket::bind(("0.0.0.0", udp_port)) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
-                    "Keşif servisi başlatılamadı (UDP {UDP_PORT}): {e}. Otomatik bulma çalışmayabilir."
+                    "Keşif servisi başlatılamadı (UDP {udp_port}): {e}. Otomatik bulma çalışmayabilir."
                 );
                 return;
             }

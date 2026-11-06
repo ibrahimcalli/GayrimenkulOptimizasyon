@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 /// Keşif için kullanılan UDP portu.
 pub const UDP_PORT: u16 = 8085;
 
+/// Yedek keşif portu: HTTP portu 8085 ile çakışırsa sunucu bunu kullanır.
+pub const UDP_PORT_ALT: u16 = 8086;
+
 /// Keşif isteği imzası (istemci -> yayın).
 pub const REQUEST: &[u8] = b"GAYRIMENKUL360_DISCOVER_V1";
 

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use common::discovery::{DiscoveryReply, DiscoveredServer, REQUEST, UDP_PORT};
+use common::discovery::{DiscoveryReply, DiscoveredServer, REQUEST, UDP_PORT, UDP_PORT_ALT};
 use common::*;
 use reqwest::blocking::multipart::{Form, Part};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -368,8 +368,9 @@ pub fn discover_servers(timeout: Duration) -> Vec<DiscoveredServer> {
     let _ = sock.set_broadcast(true);
     let _ = sock.set_read_timeout(Some(Duration::from_millis(300)));
 
-    // Yayın adresine istek gönder (birden fazla ağ arayüzü için yaygın adresler denenir)
+    // Yayın adresine istek gönder (ana + yedek keşif portu)
     let _ = sock.send_to(REQUEST, ("255.255.255.255", UDP_PORT));
+    let _ = sock.send_to(REQUEST, ("255.255.255.255", UDP_PORT_ALT));
 
     let start = std::time::Instant::now();
     let mut buf = [0u8; 512];

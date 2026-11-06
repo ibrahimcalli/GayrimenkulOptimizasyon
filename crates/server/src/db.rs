@@ -24,8 +24,18 @@ pub fn new_token() -> String {
 }
 
 /// Mevcut veritabanına sonradan eklenen kolonları güvenli şekilde ekler.
+///
+/// Idempotenttir: her kolon ALTER edilmeden önce `PRAGMA table_info` ile
+/// varlığı kontrol edilir; mevcutsa ekleme adımı atlanır. Böylece uygulama
+/// her başlangıçta güvenle çalıştırılabilir.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let columns: [(&str, &str, &str); 15] = [
+    // Bozuk göç (kolon adı eksik ALTER) nedeniyle oluşmuş olabilecek çöp kolonu temizle
+    drop_column_if_exists(conn, "settings", "INTEGER")?;
+    drop_column_if_exists(conn, "settings", "REAL")?;
+    drop_column_if_exists(conn, "settings", "TEXT")?;
+
+    // (tablo, kolon adı, kolon tanımı) — ALTER'da kolon adı ayrı ve zorunludur
+    let columns: &[(&str, &str, &str)] = &[
         ("settings", "val_title_min", "INTEGER NOT NULL DEFAULT 3"),
         ("settings", "val_phone_digits", "INTEGER NOT NULL DEFAULT 10"),
         ("settings", "val_email_required", "INTEGER NOT NULL DEFAULT 0"),
@@ -43,17 +53,34 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ("tasks", "is_deleted", "INTEGER NOT NULL DEFAULT 0"),
     ];
     for (table, name, ddl) in columns {
-        let exists: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
-                [name],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        if exists == 0 {
-            conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {ddl}"), [])?;
-            tracing::info!("{table} tablosuna kolon eklendi: {name}");
+        if column_exists(conn, table, name) {
+            continue; // kolon zaten mevcut, atla
         }
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN \"{name}\" {ddl}"),
+            [],
+        )?;
+        tracing::info!("{table} tablosuna kolon eklendi: {name}");
+    }
+    Ok(())
+}
+
+/// Kolonun tabloda var olup olmadığını `PRAGMA table_info` ile kontrol eder.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        params![table, column],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|c| c > 0)
+    .unwrap_or(false)
+}
+
+/// Tablodan kolonu (varsa) güvenle düşürür. Bozuk/çöp kolon temizliği içindir.
+fn drop_column_if_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+    if column_exists(conn, table, column) {
+        conn.execute(&format!("ALTER TABLE {table} DROP COLUMN \"{column}\""), [])?;
+        tracing::warn!("{table} tablosundaki bozuk '{column}' kolonu temizlendi");
     }
     Ok(())
 }
@@ -239,4 +266,41 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
         tracing::warn!("Varsayılan admin oluşturuldu: admin / admin123 (ilk girişten sonra değiştirin!)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Göçler idempotent olmalı: init istedi kadar çağrılabilir, hata vermemeli.
+    #[test]
+    fn migration_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        init(&conn).unwrap();
+        init(&conn).unwrap();
+    }
+
+    /// Bozuk göçle oluşmuş 'INTEGER' çöp kolonu temizlenmeli, gerçek kolonlar eklenmeli.
+    #[test]
+    fn cleans_junk_column_from_broken_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL,
+             password_hash TEXT NOT NULL, salt TEXT NOT NULL, full_name TEXT NOT NULL DEFAULT '',
+             role TEXT NOT NULL DEFAULT 'agent', phone TEXT NOT NULL DEFAULT '',
+             email TEXT NOT NULL DEFAULT '', photo TEXT, active INTEGER NOT NULL DEFAULT 1,
+             created_at TEXT NOT NULL);
+             CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 1),
+             header_text TEXT NOT NULL DEFAULT 'x', footer_text TEXT NOT NULL DEFAULT 'y');
+             ALTER TABLE settings ADD COLUMN \"INTEGER\" INTEGER NOT NULL DEFAULT 3;",
+        )
+        .unwrap();
+
+        init(&conn).unwrap();
+
+        assert!(!column_exists(&conn, "settings", "INTEGER"), "çöp kolon temizlenmedi");
+        assert!(column_exists(&conn, "settings", "val_title_min"), "val_title_min eklenmedi");
+        assert!(column_exists(&conn, "settings", "default_theme"), "default_theme eklenmedi");
+    }
 }
