@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use chrono::Datelike;
 use common::discovery::DiscoveredServer;
 use common::*;
 use eframe::egui;
@@ -33,7 +34,11 @@ pub struct FormState {
     pub status: usize,
     pub price: f64,
     pub currency: usize,
+    pub price_text: String,
     pub area_m2: f64,
+    pub area_net: f64,
+    pub ada_parsel: String,
+    pub coord_paste: String,
     pub room_count: String,
     pub building_age: String,
     pub floor: String,
@@ -103,8 +108,7 @@ pub struct CrmForm {
 pub struct ShiftPlanForm {
     pub user_idx: usize,
     pub month: String,
-    pub work_days: i64,
-    pub daily_hours: f64,
+    pub weekdays: Vec<usize>, // 1=Pzt .. 7=Paz
     pub start_time: String,
     pub end_time: String,
     pub note: String,
@@ -185,6 +189,61 @@ pub struct App {
     pub zoom: f64,
     pub local_theme_set: bool,
     pub settings_tab: SettingsTab,
+    pub font_family: usize, // 0=Roboto 1=Sistem
+    pub font_size: f64,     // gövde punto
+    pub accent: String,     // "blue"|"green"|"gray"|"orange"|"purple"
+    pub att_sel: Vec<i64>,
+    pub report_sel: Vec<i64>,
+    pub report_month: String,
+    pub help_topics: Vec<HelpTopic>,
+    pub help_open: Option<String>,
+    pub test_log: String,
+    pub test_running: bool,
+}
+
+/// Yeni boş portföy formu; "Yeni sahip ekle" varsayılan seçili gelir.
+pub fn fresh_form() -> FormState {
+    FormState {
+        owner_choice: 1,
+        ..Default::default()
+    }
+}
+
+/// Fiyat girişinde binlik ayraç otomatik: 6000000 -> 6.000.000
+pub fn format_price_input(raw: &str) -> String {
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).take(15).collect();
+    if digits.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (i, ch) in digits.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push('.');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+/// Yapıştırılan metinden "36.1234, 29.5678" biçiminde koordinat çıkarır.
+pub fn parse_coords(s: &str) -> Option<(f64, f64)> {
+    let cleaned: String = s
+        .chars()
+        .map(|c| match c { '٫' | ',' => ',', _ => c })
+        .collect();
+    let nums: Vec<&str> = cleaned
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == ',' || c == '-'))
+        .filter(|x| !x.is_empty())
+        .collect();
+    if nums.len() < 2 {
+        return None;
+    }
+    let lat: f64 = nums[0].replace(',', ".").parse().ok()?;
+    let lng: f64 = nums[1].replace(',', ".").parse().ok()?;
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lng) {
+        return None;
+    }
+    Some((lat, lng))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -193,6 +252,8 @@ pub enum SettingsTab {
     Output,
     Validation,
     Users,
+    Help,
+    Test,
 }
 
 const CURRENCIES: [&str; 4] = ["TRY", "USD", "EUR", "GBP"];
@@ -210,7 +271,7 @@ const METRICS: [&str; 5] = [
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Türkçe karakter desteği: Roboto fontlarını varsayılan yap.
-        Self::install_turkish_fonts(&cc.egui_ctx);
+        Self::install_roboto_fonts(&cc.egui_ctx);
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         cc.egui_ctx.set_style(style);
@@ -279,10 +340,76 @@ impl App {
             zoom: if cfg.zoom > 0.05 { cfg.zoom } else { 1.0 },
             local_theme_set: !cfg.theme.is_empty(),
             settings_tab: SettingsTab::View,
+            font_family: cfg.font_family,
+            font_size: if (10.0..=26.0).contains(&cfg.font_size) { cfg.font_size } else { 14.0 },
+            accent: if cfg.accent.is_empty() { "blue".to_string() } else { cfg.accent },
+            att_sel: Vec::new(),
+            report_sel: Vec::new(),
+            report_month: String::new(),
+            help_topics: Vec::new(),
+            help_open: None,
+            test_log: String::new(),
+            test_running: false,
         };
-        app.apply_theme(&cc.egui_ctx);
-        cc.egui_ctx.set_zoom_factor(app.zoom as f32);
+        app.apply_all_ui(&cc.egui_ctx);
         app
+    }
+
+    /// Tema + font + ölçek + renk vurgusu tercihlerinin tamamını uygular.
+    fn apply_all_ui(&self, ctx: &egui::Context) {
+        self.apply_theme(ctx);
+        self.apply_fonts(ctx);
+        self.apply_font_size(ctx);
+        self.apply_accent(ctx);
+        ctx.set_zoom_factor(self.zoom as f32);
+    }
+
+    /// Yazı tipi ailesini uygular (Roboto gömülü / sistem fontu).
+    fn apply_fonts(&self, ctx: &egui::Context) {
+        match self.font_family {
+            1 => {
+                let mut f = egui::FontDefinitions::default();
+                f.families.insert(
+                    egui::FontFamily::Name("navbold".into()),
+                    vec!["Ubuntu-Light".to_string()],
+                );
+                ctx.set_fonts(f);
+            }
+            _ => Self::install_roboto_fonts(ctx),
+        }
+    }
+
+    /// Gövde punto boyutunu tüm metin stillerine oranlı uygular.
+    fn apply_font_size(&self, ctx: &egui::Context) {
+        let base = self.font_size as f32;
+        let mut style = (*ctx.style()).clone();
+        style.text_styles = [
+            (egui::TextStyle::Heading, egui::FontId::proportional(base * 1.45)),
+            (egui::TextStyle::Body, egui::FontId::proportional(base)),
+            (egui::TextStyle::Button, egui::FontId::proportional(base)),
+            (egui::TextStyle::Small, egui::FontId::proportional(base * 0.8)),
+            (egui::TextStyle::Monospace, egui::FontId::monospace(base * 0.9)),
+        ]
+        .into();
+        ctx.set_style(style);
+    }
+
+    /// Renk vurgusu (mavi/yeşil/gri/turuncu/mor) uygular.
+    fn apply_accent(&self, ctx: &egui::Context) {
+        let accent = match self.accent.as_str() {
+            "green" => egui::Color32::from_rgb(56, 142, 60),
+            "gray" => egui::Color32::from_rgb(120, 128, 136),
+            "orange" => egui::Color32::from_rgb(224, 122, 40),
+            "purple" => egui::Color32::from_rgb(140, 68, 173),
+            _ => egui::Color32::from_rgb(46, 116, 181),
+        };
+        let mut style = (*ctx.style()).clone();
+        style.visuals.selection.bg_fill = accent;
+        style.visuals.selection.stroke = egui::Stroke::new(1.2, egui::Color32::WHITE);
+        style.visuals.widgets.active.bg_fill = accent;
+        style.visuals.widgets.hovered.bg_fill = accent.gamma_multiply(0.35);
+        style.visuals.hyperlink_color = accent;
+        ctx.set_style(style);
     }
 
     /// Tema tercihini egui'ye uygular.
@@ -346,6 +473,9 @@ impl App {
             server_url: self.server_url.clone(),
             theme: self.theme.clone(),
             zoom: self.zoom,
+            font_family: self.font_family,
+            font_size: self.font_size,
+            accent: self.accent.clone(),
         };
         if let Ok(s) = serde_json::to_string_pretty(&cfg) {
             let _ = std::fs::write(config_file(), s);
@@ -381,8 +511,15 @@ impl App {
         self.load_attendance();
         self.load_notifications();
         self.load_settings();
+        self.load_help();
         if self.is_admin() {
             self.load_crm();
+        }
+    }
+
+    fn load_help(&mut self) {
+        if let Ok(h) = self.api.list_help() {
+            self.help_topics = h;
         }
     }
 
@@ -522,9 +659,108 @@ impl App {
 
     // ---------------- update ----------------
 
-    /// Türkçe karakter kümesini (ç ğ ı ö ş ü İ Ğ Ş) tam destekleyen font kurulumu.
+    pub const WEEKDAYS: [&str; 7] = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"];
+
+fn digits_only(s: &str, max: usize) -> String {
+    s.chars().filter(|c| c.is_ascii_digit()).take(max).collect()
+}
+
+/// GG-AA-YYYY girişinde her 2 rakamdan sonra otomatik tire ekler.
+pub fn auto_dash_date(s: &str) -> String {
+    let d = Self::digits_only(s, 8);
+    let mut out = String::new();
+    for (i, ch) in d.chars().enumerate() {
+        if i == 2 || i == 4 {
+            out.push('-');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// GG-AA-YYYY -> YYYY-MM-DD (geçersizse None).
+pub fn iso_from_display(s: &str) -> Option<String> {
+    let p: Vec<&str> = s.split('-').collect();
+    if p.len() != 3 {
+        return None;
+    }
+    let (d, m, y) = (p[0], p[1], p[2]);
+    let ok_digits = |x: &str| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit());
+    if d.len() != 2 || m.len() != 2 || y.len() != 4 || !ok_digits(d) || !ok_digits(m) || !ok_digits(y) {
+        return None;
+    }
+    let dd: u32 = d.parse().ok()?;
+    let mm: u32 = m.parse().ok()?;
+    let yy: i32 = y.parse().ok()?;
+    if !(1..=31).contains(&dd) || !(1..=12).contains(&mm) {
+        return None;
+    }
+    Some(format!("{yy:04}-{mm:02}-{dd:02}"))
+}
+
+fn date_field(ui: &mut egui::Ui, value: &mut String, hint: &str) {
+    let before = value.clone();
+    ui.add(egui::TextEdit::singleline(value).desired_width(104.0).hint_text(hint));
+    if *value != before {
+        *value = Self::auto_dash_date(value);
+    }
+}
+
+/// "1,3,5" -> "Pazartesi, Çarşamba, Cuma"
+pub fn weekday_names(csv: &str) -> String {
+    let mut names = Vec::new();
+    for part in csv.split(',') {
+        if let Ok(i) = part.trim().parse::<usize>() {
+            if (1..=7).contains(&i) {
+                names.push(Self::WEEKDAYS[i - 1]);
+            }
+        }
+    }
+    if names.is_empty() { "—".to_string() } else { names.join(", ") }
+}
+
+/// "10:30" -> 10.5
+fn parse_hhmm(s: &str) -> f64 {
+    let p: Vec<&str> = s.split(':').collect();
+    let h = p.first().and_then(|x| x.trim().parse::<f64>().ok()).unwrap_or(0.0);
+    let m = p.get(1).and_then(|x| x.trim().parse::<f64>().ok()).unwrap_or(0.0);
+    h + m / 60.0
+}
+
+/// "2026-11" ayının tüm günleri.
+fn month_days(month: &str) -> Vec<chrono::NaiveDate> {
+    let p: Vec<&str> = month.split('-').collect();
+    if p.len() != 2 {
+        return Vec::new();
+    }
+    let (y, m) = match (p[0].parse::<i32>(), p[1].parse::<u32>()) {
+        (Ok(y), Ok(m)) if (1..=12).contains(&m) => (y, m),
+        _ => return Vec::new(),
+    };
+    let first = match chrono::NaiveDate::from_ymd_opt(y, m, 1) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let last = match chrono::NaiveDate::from_ymd_opt(ny, nm, 1) {
+        Some(d) => d.pred_opt().unwrap_or(first),
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let mut cur = first;
+    while cur <= last {
+        out.push(cur);
+        match cur.succ_opt() {
+            Some(n) => cur = n,
+            None => break,
+        }
+    }
+    out
+}
+
+/// Türkçe karakter kümesini (ç ğ ı ö ş ü İ Ğ Ş) tam destekleyen font kurulumu.
 /// Roboto tüm metinlerde öncelikli kullanılır; emoji/ikon fontları yedekte kalır.
-fn install_turkish_fonts(ctx: &egui::Context) {
+fn install_roboto_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "roboto_regular".to_string(),
@@ -542,6 +778,12 @@ fn install_turkish_fonts(ctx: &egui::Context) {
 
     let mono = fonts.families.entry(egui::FontFamily::Monospace).or_default();
     mono.push("roboto_regular".to_string());
+
+    // Menü için bold aile
+    fonts.families.insert(
+        egui::FontFamily::Name("navbold".into()),
+        vec!["roboto_bold".to_string(), "roboto_regular".to_string()],
+    );
 
     ctx.set_fonts(fonts);
 }
@@ -625,9 +867,76 @@ impl eframe::App for App {
             }
         });
 
+        // Sağ üst köşe yardım düğmesi
+        if self.user.is_some() && self.screen != Screen::Login {
+            let key = self.help_key_for(self.screen);
+            egui::Area::new(egui::Id::new("help_btn_area"))
+                .anchor(egui::Align2::RIGHT_TOP, [-10.0, 34.0])
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    let btn = egui::Button::new(
+                        egui::RichText::new("?").strong().size(16.0).color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(46, 116, 181))
+                    .rounding(egui::Rounding::same(14.0))
+                    .min_size(egui::vec2(28.0, 28.0));
+                    if ui.add(btn).clicked() {
+                        self.help_open = Some(key.to_string());
+                    }
+                });
+        }
+        self.help_window(ctx);
+
         self.messages(ctx);
         self.notification_popup(ctx);
         self.cover_zoom_window(ctx);
+    }
+}
+
+impl App {
+    fn help_key_for(&self, screen: Screen) -> &'static str {
+        match screen {
+            Screen::Welcome => "welcome",
+            Screen::PortfolioForm => "portfolio_form",
+            Screen::PortfolioDetail => "portfolio_detail",
+            Screen::Tasks => "tasks",
+            Screen::Goals => "goals",
+            Screen::Shifts => "shifts",
+            Screen::Crm => "crm",
+            Screen::Users => "users",
+            Screen::Settings => "settings",
+            Screen::Profile => "profile",
+            Screen::Login => "welcome",
+        }
+    }
+
+    fn help_window(&mut self, ctx: &egui::Context) {
+        if let Some(key) = self.help_open.clone() {
+            let topic = self.help_topics.iter().find(|t| t.key == key).cloned();
+            let mut open = true;
+            egui::Window::new(
+                egui::RichText::new(format!("ℹ  {}", topic.as_ref().map(|t| t.title.clone()).unwrap_or_else(|| "Yardım".into())))
+                    .strong(),
+            )
+            .open(&mut open)
+            .default_width(430.0)
+            .show(ctx, |ui| {
+                match &topic {
+                    Some(t) => {
+                        // Etiketler seçilebilir: kopyalanabilir
+                        for line in t.body.split('\n') {
+                            ui.label(egui::RichText::new(line));
+                        }
+                    }
+                    None => {
+                        ui.label("Bu ekran için yardım içeriği bulunamadı. Ayarlar > Yardım İçerikleri bölümünden ekleyebilirsiniz.");
+                    }
+                }
+            });
+            if !open {
+                self.help_open = None;
+            }
+        }
     }
 }
 
@@ -768,19 +1077,19 @@ impl App {
             .default_width(190.0)
             .show(ctx, |ui| {
                 ui.add_space(8.0);
-                nav_button(ui, &mut target, self.screen, Screen::Welcome, "🏠  Portföyler");
-                nav_button(ui, &mut target, self.screen, Screen::PortfolioForm, "➕  Yeni Portföy");
-                nav_button(ui, &mut target, self.screen, Screen::Tasks, "✅  Görevler");
-                nav_button(ui, &mut target, self.screen, Screen::Goals, "🎯  Hedefler");
-                nav_button(ui, &mut target, self.screen, Screen::Shifts, "🕒  Mesai");
+                nav_button(ui, &mut target, self.screen, Screen::Welcome, "🏢", "Portföyler", egui::Color32::from_rgb(86, 156, 214));
+                nav_button(ui, &mut target, self.screen, Screen::PortfolioForm, "➕", "Yeni Portföy", egui::Color32::from_rgb(106, 190, 110));
+                nav_button(ui, &mut target, self.screen, Screen::Tasks, "✅", "Görevler", egui::Color32::from_rgb(230, 160, 66));
+                nav_button(ui, &mut target, self.screen, Screen::Goals, "🎯", "Hedefler", egui::Color32::from_rgb(186, 110, 220));
+                nav_button(ui, &mut target, self.screen, Screen::Shifts, "🕒", "Vardiya / Mesai", egui::Color32::from_rgb(80, 190, 190));
                 ui.separator();
                 if self.is_admin() {
-                    nav_button(ui, &mut target, self.screen, Screen::Crm, "👥  CRM Kayıtları");
-                    nav_button(ui, &mut target, self.screen, Screen::Users, "🧑‍💼  Kullanıcılar");
+                    nav_button(ui, &mut target, self.screen, Screen::Crm, "👥", "CRM Kayıtları", egui::Color32::from_rgb(120, 140, 220));
+                    nav_button(ui, &mut target, self.screen, Screen::Users, "🧑", "Kullanıcılar", egui::Color32::from_rgb(200, 130, 180));
                     ui.separator();
                 }
-                nav_button(ui, &mut target, self.screen, Screen::Settings, "⚙  Ayarlar");
-                nav_button(ui, &mut target, self.screen, Screen::Profile, "👤  Profilim");
+                nav_button(ui, &mut target, self.screen, Screen::Settings, "⚙", "Ayarlar", egui::Color32::from_rgb(160, 160, 170));
+                nav_button(ui, &mut target, self.screen, Screen::Profile, "👤", "Profilim", egui::Color32::from_rgb(150, 190, 120));
                 ui.add_space(10.0);
                 ui.separator();
                 ui.label(egui::RichText::new(format!("Portföy: {}", self.portfolios.len())).small());
@@ -794,7 +1103,7 @@ impl App {
             });
         if let Some(s) = target {
             if s == Screen::PortfolioForm {
-                self.form = FormState::default();
+                self.form = fresh_form();
             }
             self.navigate(s);
         }
@@ -888,15 +1197,44 @@ impl App {
     }
 }
 
-fn nav_button(ui: &mut egui::Ui, target: &mut Option<Screen>, current: Screen, to: Screen, label: &str) {
+/// Renkli ikonlu, bold, sola yaslı menü düğmesi.
+fn nav_button(
+    ui: &mut egui::Ui,
+    target: &mut Option<Screen>,
+    current: Screen,
+    to: Screen,
+    icon: &str,
+    label: &str,
+    color: egui::Color32,
+) {
     let selected = current == to;
-    if ui
-        .add_sized(
-            [ui.available_width(), 30.0],
-            egui::SelectableLabel::new(selected, label),
-        )
-        .clicked()
-    {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 30.0), egui::Sense::click());
+    let p = ui.painter_at(rect);
+    let v = ui.visuals();
+    let bg = if selected {
+        v.selection.bg_fill
+    } else if resp.hovered() {
+        v.widgets.hovered.bg_fill
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    p.rect_filled(rect, 6.0, bg);
+    p.text(
+        egui::pos2(rect.left() + 15.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(15.0),
+        color,
+    );
+    p.text(
+        egui::pos2(rect.left() + 33.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::new(13.5, egui::FontFamily::Name("navbold".into())),
+        if selected { v.strong_text_color() } else { v.text_color() },
+    );
+    if resp.clicked() {
         *target = Some(to);
     }
 }
@@ -908,7 +1246,15 @@ struct ClientConfig {
     theme: String,
     #[serde(default)]
     zoom: f64,
+    #[serde(default)]
+    font_family: usize,
+    #[serde(default = "d_font_size")]
+    font_size: f64,
+    #[serde(default)]
+    accent: String,
 }
+
+fn d_font_size() -> f64 { 14.0 }
 
 fn config_file() -> PathBuf {
     std::env::current_dir()
@@ -1181,14 +1527,47 @@ impl App {
                 ui.end_row();
 
                 ui.label("Fiyat");
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut self.form.price).speed(1000.0).max_decimals(0));
-                    combo_index(ui, "pf_cur", &mut self.form.currency, &[], &CURRENCIES);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        let before = self.form.price_text.clone();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.form.price_text)
+                                .desired_width(150.0)
+                                .font(egui::TextStyle::Monospace)
+                                .hint_text("6.000.000"),
+                        );
+                        if self.form.price_text != before {
+                            self.form.price_text = format_price_input(&self.form.price_text);
+                        }
+                        combo_index(ui, "pf_cur", &mut self.form.currency, &[], &CURRENCIES);
+                    });
+                    // Taşınmaz m² fiyatı otomatik hesap
+                    let brut = self.form.area_m2;
+                    let price = format_price_input(&self.form.price_text)
+                        .replace('.', "")
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    if brut > 0.0 && price > 0.0 {
+                        let m2 = price / brut;
+                        ui.label(
+                            egui::RichText::new(format!("Taşınmaz m² fiyatı: {:.0} {}/m²", m2, CURRENCIES[self.form.currency.min(3)]))
+                                .small()
+                                .color(egui::Color32::from_rgb(90, 160, 90)),
+                        );
+                    }
                 });
                 ui.end_row();
 
-                ui.label("Alan (m²)");
+                ui.label("Alan (Brüt m²)");
                 ui.add(egui::DragValue::new(&mut self.form.area_m2).speed(1.0).max_decimals(0));
+                ui.end_row();
+
+                ui.label("Alan (Net m²)");
+                ui.add(egui::DragValue::new(&mut self.form.area_net).speed(1.0).max_decimals(0));
+                ui.end_row();
+
+                ui.label("Ada / Parsel");
+                ui.add(egui::TextEdit::singleline(&mut self.form.ada_parsel).desired_width(200.0).hint_text("Ada 123, Parsel 456"));
                 ui.end_row();
 
                 ui.label("Oda Sayısı");
@@ -1233,9 +1612,49 @@ impl App {
                 ui.end_row();
 
                 ui.label("Konum (Enlem, Boylam)");
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut self.form.latitude).speed(0.0001).max_decimals(6).prefix("En: "));
-                    ui.add(egui::DragValue::new(&mut self.form.longitude).speed(0.0001).max_decimals(6).prefix("Boy: "));
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut self.form.latitude).speed(0.0001).max_decimals(6).prefix("En: "));
+                        ui.add(egui::DragValue::new(&mut self.form.longitude).speed(0.0001).max_decimals(6).prefix("Boy: "));
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        let ilce = if self.form.ilce == 0 { "Fethiye".to_string() } else { common::mugla::DISTRICTS[self.form.ilce - 1].to_string() };
+                        let mah = { let m = self.form.current_mahalles(); if self.form.mahalle == 0 || self.form.mahalle > m.len() { String::new() } else { m[self.form.mahalle - 1].to_string() } };
+                        if ui.small_button("🗺 Google Uydu (seç)").clicked() {
+                            let (lat, lng) = self.picked_coord_hint();
+                            let _ = open::that(format!("https://www.google.com/maps/@{lat},{lng},18z/data=!3m1!1e3"));
+                            self.set_error("Uydu haritada yere sağ tıklayıp koordinatı kopyalayın, aşağıya yapıştırıp Uygula'ya basın.".to_string());
+                        }
+                        if ui.small_button("🛰 Yandex Uydu (seç)").clicked() {
+                            let (lat, lng) = self.picked_coord_hint();
+                            let _ = open::that(format!("https://yandex.com.tr/maps/?l=sat&ll={lng},{lat}&z=18"));
+                            self.set_error("Haritada yere sağ tıklayıp koordinatı kopyalayın, aşağıya yapıştırıp Uygula'ya basın.".to_string());
+                        }
+                        if !mah.is_empty() && ui.small_button("🏘 Mahalleyi Haritada Ara").clicked() {
+                            let q = format!("{} {} Muğla", ilce, mah);
+                            let _ = open::that(format!("https://www.google.com/maps/search/?api=1&query={}", urlencode(&q)));
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let before = self.form.coord_paste.clone();
+                        ui.add(egui::TextEdit::singleline(&mut self.form.coord_paste).desired_width(190.0).hint_text("Koordinatı buraya yapıştırın"));
+                        if self.form.coord_paste != before {
+                            if let Some((lat, lng)) = parse_coords(&self.form.coord_paste) {
+                                self.form.latitude = lat;
+                                self.form.longitude = lng;
+                            }
+                        }
+                        if ui.small_button("Uygula").clicked() {
+                            if let Some((lat, lng)) = parse_coords(&self.form.coord_paste) {
+                                self.form.latitude = lat;
+                                self.form.longitude = lng;
+                                self.form.coord_paste.clear();
+                                self.toast("Koordinat uygulandı", false);
+                            } else {
+                                self.set_error("Koordinat okunamadı. Örnek: 36.6214, 29.1163".into());
+                            }
+                        }
+                    });
                 });
                 ui.end_row();
 
@@ -1353,7 +1772,7 @@ impl App {
                     self.save_portfolio();
                 }
                 if ui.button("İptal").clicked() {
-                    self.form = FormState::default();
+                    self.form = fresh_form();
                     self.navigate(Screen::Welcome);
                 }
             });
@@ -1456,14 +1875,23 @@ impl App {
             }
         }
 
+        let price_val = self
+            .form
+            .price_text
+            .replace('.', "")
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(self.form.price);
         let input = PortfolioInput {
             title: self.form.title.trim().to_string(),
             listing_type: ListingType::ALL[self.form.listing_type.min(1)].as_str().to_string(),
             category: PropertyCategory::ALL[self.form.category.min(4)].as_str().to_string(),
             status: PortfolioStatus::ALL[self.form.status.min(3)].as_str().to_string(),
-            price: self.form.price,
+            price: price_val,
             currency: CURRENCIES[self.form.currency.min(3)].to_string(),
             area_m2: self.form.area_m2,
+            area_net: self.form.area_net,
+            ada_parsel: self.form.ada_parsel.clone(),
             room_count: self.form.room_count.clone(),
             building_age: self.form.building_age.clone(),
             floor: self.form.floor.clone(),
@@ -1501,7 +1929,7 @@ impl App {
                         Err(e) => self.set_error(e),
                     }
                 }
-                self.form = FormState::default();
+                self.form = fresh_form();
                 self.toast("Portföy kaydedildi", false);
                 self.navigate(Screen::Welcome);
             }
@@ -1562,7 +1990,13 @@ impl App {
                 detail_row(ui, "Tür / Kategori", &format!("{} / {}", portfolio.listing_type_label(), portfolio.category_label()));
                 detail_row(ui, "Durum", &portfolio.status_label());
                 detail_row(ui, "Fiyat", &format_price(portfolio.price, &portfolio.currency));
-                detail_row(ui, "Alan", &format!("{} m²", portfolio.area_m2));
+                detail_row(ui, "Alan", &format!("{} m² brüt / {} m² net", portfolio.area_m2, portfolio.area_net));
+                if !portfolio.ada_parsel.is_empty() {
+                    detail_row(ui, "Ada / Parsel", &portfolio.ada_parsel);
+                }
+                if portfolio.area_m2 > 0.0 && portfolio.price > 0.0 {
+                    detail_row(ui, "m² Fiyatı", &format!("{:.0} {}/m²", portfolio.price / portfolio.area_m2, portfolio.currency));
+                }
                 detail_row(ui, "Oda", &portfolio.room_count);
                 detail_row(ui, "Bina Yaşı", &portfolio.building_age);
                 detail_row(ui, "Kat", &format!("{} / {}", portfolio.floor, portfolio.total_floors));
@@ -1638,6 +2072,15 @@ impl App {
         });
     }
 
+    /// Haritayı açarken kullanılacak başlangıç koordinatı (boşsa Fethiye merkezi).
+    fn picked_coord_hint(&self) -> (f64, f64) {
+        if self.form.latitude != 0.0 || self.form.longitude != 0.0 {
+            (self.form.latitude, self.form.longitude)
+        } else {
+            (36.6214, 29.1163) // Fethiye merkez
+        }
+    }
+
     fn start_edit(&mut self, p: &Portfolio) {
         let ilce = common::mugla::DISTRICTS.iter().position(|d| *d == p.ilce).map(|i| i + 1).unwrap_or(0);
         let mahs = common::mugla::neighborhoods(&p.ilce);
@@ -1664,7 +2107,10 @@ impl App {
             status,
             price: p.price,
             currency,
+            price_text: format_price_input(&format!("{}", p.price.round() as i64)),
             area_m2: p.area_m2,
+            area_net: p.area_net,
+            ada_parsel: p.ada_parsel.clone(),
             room_count: p.room_count.clone(),
             building_age: p.building_age.clone(),
             floor: p.floor.clone(),
@@ -1793,7 +2239,7 @@ impl App {
                     ui.end_row();
                     ui.label("Tarih / Saat");
                     ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.task_form.due_date).desired_width(120.0).hint_text("2026-11-08"));
+                        Self::date_field(ui, &mut self.task_form.due_date, "GG-AA-YYYY");
                         ui.add(egui::TextEdit::singleline(&mut self.task_form.due_time).desired_width(80.0).hint_text("16:00"));
                     });
                     ui.end_row();
@@ -1802,12 +2248,24 @@ impl App {
                     ui.end_row();
                 });
                 if ui.button("Görevi Ata").clicked() {
-                    let due = if self.task_form.due_date.trim().is_empty() {
+                    let iso = if self.task_form.due_date.trim().is_empty() {
+                        Some(String::new())
+                    } else {
+                        Self::iso_from_display(&self.task_form.due_date)
+                    };
+                    let iso = match iso {
+                        Some(v) => v,
+                        None => {
+                            self.set_error("Geçerli bir tarih giriniz (GG-AA-YYYY)".into());
+                            return;
+                        }
+                    };
+                    let due = if iso.is_empty() {
                         String::new()
                     } else if self.task_form.due_time.trim().is_empty() {
-                        self.task_form.due_date.clone()
+                        iso
                     } else {
-                        format!("{} {}", self.task_form.due_date, self.task_form.due_time)
+                        format!("{} {}", iso, self.task_form.due_time)
                     };
                     let input = TaskInput {
                         title: self.task_form.title.clone(),
@@ -1912,12 +2370,30 @@ impl App {
                         ui.end_row();
                         ui.label("Başlangıç / Bitiş");
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.goal_form.period_start).desired_width(120.0).hint_text("2026-11-01"));
-                            ui.add(egui::TextEdit::singleline(&mut self.goal_form.period_end).desired_width(120.0).hint_text("2026-11-30"));
+                            Self::date_field(ui, &mut self.goal_form.period_start, "GG-AA-YYYY");
+                            ui.label("—");
+                            Self::date_field(ui, &mut self.goal_form.period_end, "GG-AA-YYYY");
                         });
                         ui.end_row();
                     });
                     if ui.button("Hedefi Ata").clicked() {
+                        let ps = if self.goal_form.period_start.trim().is_empty() {
+                            Some(String::new())
+                        } else {
+                            Self::iso_from_display(&self.goal_form.period_start)
+                        };
+                        let pe = if self.goal_form.period_end.trim().is_empty() {
+                            Some(String::new())
+                        } else {
+                            Self::iso_from_display(&self.goal_form.period_end)
+                        };
+                        let (ps, pe) = match (ps, pe) {
+                            (Some(a), Some(b)) => (a, b),
+                            _ => {
+                                self.set_error("Geçerli dönem tarihleri giriniz (GG-AA-YYYY)".into());
+                                return;
+                            }
+                        };
                         let (scope, user_id) = if self.goal_form.scope_user == 0 {
                             ("team".to_string(), None)
                         } else {
@@ -1929,8 +2405,8 @@ impl App {
                             title: self.goal_form.title.clone(),
                             metric: METRICS[self.goal_form.metric.min(4)].to_string(),
                             target_count: self.goal_form.target_count,
-                            period_start: self.goal_form.period_start.clone(),
-                            period_end: self.goal_form.period_end.clone(),
+                            period_start: ps,
+                            period_end: pe,
                         };
                         match self.api.create_goal(&input) {
                             Ok(_) => {
@@ -1985,10 +2461,14 @@ impl App {
         ui.heading("Vardiya ve Mesai");
         ui.separator();
 
-        let tabs = [("📋 Vardiya Takvimi", 0usize), ("✅ Mesai Onay Listesi", 1usize)];
+        let tabs = [
+            ("📋 Vardiya Takvimi", 0usize),
+            ("✅ Mesai Onay Listesi", 1usize),
+            ("📈 Vardiya Raporu", 2usize),
+        ];
         ui.horizontal(|ui| {
             for (label, i) in tabs {
-                let admin_only = i == 1;
+                let admin_only = i > 0;
                 if admin_only && !self.is_admin() {
                     continue;
                 }
@@ -2001,94 +2481,128 @@ impl App {
 
         match self.shift_tab {
             0 => self.shift_plans_tab(ui),
-            _ => self.shift_approval_tab(ui),
+            1 => self.shift_approval_tab(ui),
+            _ => self.shift_report_tab(ui),
         }
     }
 
-    /// Salt-okunur vardiya takvimi: kullanıcılar kendi ve ekip arkadaşlarının
-    /// tanımlı mesai saatlerini görür; düzenleme yalnızca yöneticide.
+    /// Vardiya takvimi: kullanıcılar planı salt-okunur görür; düzenleme yöneticide.
     fn shift_plans_tab(&mut self, ui: &mut egui::Ui) {
         if self.is_admin() {
-            egui::CollapsingHeader::new("➕ Vardiya Planı Ata / Güncelle").show(ui, |ui| {
-                egui::Grid::new("plan_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                    ui.label("Personel *");
-                    let labels: Vec<String> = self
-                        .users
-                        .iter()
-                        .map(|u| if u.full_name.is_empty() { u.username.clone() } else { u.full_name.clone() })
-                        .collect();
-                    let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-                    combo_index(ui, "plan_user", &mut self.plan_form.user_idx, &[], &refs);
-                    ui.end_row();
-                    ui.label("Ay *");
-                    ui.add(egui::TextEdit::singleline(&mut self.plan_form.month).desired_width(120.0).hint_text("2026-11"));
-                    ui.end_row();
-                    ui.label("Aylık iş günü");
-                    ui.add(egui::DragValue::new(&mut self.plan_form.work_days).range(1..=31).suffix(" gün"));
-                    ui.end_row();
-                    ui.label("Günlük çalışma saati");
-                    ui.add(egui::DragValue::new(&mut self.plan_form.daily_hours).range(0.5..=16.0).speed(0.5).suffix(" sa"));
-                    ui.end_row();
-                    ui.label("Açılış / Kapanış saati");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.plan_form.start_time).desired_width(80.0).hint_text("09:00"));
-                        ui.label("—");
-                        ui.add(egui::TextEdit::singleline(&mut self.plan_form.end_time).desired_width(80.0).hint_text("18:00"));
-                    });
-                    ui.end_row();
-                    ui.label("Not");
-                    ui.add(egui::TextEdit::singleline(&mut self.plan_form.note).desired_width(240.0));
-                    ui.end_row();
-                });
-                if ui.button("Planı Kaydet").clicked() {
-                    if let Some(u) = self.users.get(self.plan_form.user_idx) {
-                        let input = ShiftPlanInput {
-                            user_id: u.id,
-                            month: self.plan_form.month.trim().to_string(),
-                            work_days: self.plan_form.work_days,
-                            daily_hours: self.plan_form.daily_hours,
-                            start_time: if self.plan_form.start_time.is_empty() { "09:00".into() } else { self.plan_form.start_time.clone() },
-                            end_time: if self.plan_form.end_time.is_empty() { "18:00".into() } else { self.plan_form.end_time.clone() },
-                            note: self.plan_form.note.clone(),
-                        };
-                        match self.api.upsert_shift_plan(&input) {
-                            Ok(_) => {
-                                self.toast("Vardiya planı kaydedildi", false);
-                                self.plan_form = ShiftPlanForm::default();
-                                self.load_plans();
+            egui::CollapsingHeader::new("➕ Vardiya Penceresi Ekle (gün + saat aralığı)")
+                .show(ui, |ui| {
+                    egui::Grid::new("plan_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                        ui.label("Personel *");
+                        let labels: Vec<String> = self
+                            .users
+                            .iter()
+                            .map(|u| if u.full_name.is_empty() { u.username.clone() } else { u.full_name.clone() })
+                            .collect();
+                        let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+                        combo_index(ui, "plan_user", &mut self.plan_form.user_idx, &[], &refs);
+                        ui.end_row();
+                        ui.label("Ay *");
+                        ui.add(egui::TextEdit::singleline(&mut self.plan_form.month).desired_width(120.0).hint_text("2026-11"));
+                        ui.end_row();
+                        ui.label("Haftanın Günleri *");
+                        ui.horizontal_wrapped(|ui| {
+                            for (i, name) in Self::WEEKDAYS.iter().enumerate() {
+                                let day = i + 1;
+                                let mut sel = self.plan_form.weekdays.contains(&day);
+                                if ui.checkbox(&mut sel, *name).changed() {
+                                    if sel {
+                                        if !self.plan_form.weekdays.contains(&day) {
+                                            self.plan_form.weekdays.push(day);
+                                        }
+                                    } else {
+                                        self.plan_form.weekdays.retain(|d| *d != day);
+                                    }
+                                }
                             }
-                            Err(e) => self.set_error(e),
+                        });
+                        ui.end_row();
+                        ui.label("Çalışma Saati *");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.plan_form.start_time).desired_width(70.0).hint_text("10:00"));
+                            ui.label("—");
+                            ui.add(egui::TextEdit::singleline(&mut self.plan_form.end_time).desired_width(70.0).hint_text("14:00"));
+                        });
+                        ui.end_row();
+                        ui.label("Not");
+                        ui.add(egui::TextEdit::singleline(&mut self.plan_form.note).desired_width(240.0).hint_text("örn. Açılış vardiyası"));
+                        ui.end_row();
+                    });
+                    if ui.button("Pencere Ekle").clicked() {
+                        if self.plan_form.weekdays.is_empty() {
+                            self.set_error("En az bir gün seçin".into());
+                        } else if let Some(u) = self.users.get(self.plan_form.user_idx) {
+                            let weekdays = self
+                                .plan_form
+                                .weekdays
+                                .iter()
+                                .map(|d| d.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            let input = ShiftPlanInput {
+                                user_id: u.id,
+                                month: self.plan_form.month.trim().to_string(),
+                                work_days: self.plan_form.weekdays.len() as i64,
+                                daily_hours: (Self::parse_hhmm(&self.plan_form.end_time)
+                                    - Self::parse_hhmm(&self.plan_form.start_time))
+                                    .max(0.0),
+                                start_time: if self.plan_form.start_time.is_empty() { "09:00".into() } else { self.plan_form.start_time.clone() },
+                                end_time: if self.plan_form.end_time.is_empty() { "18:00".into() } else { self.plan_form.end_time.clone() },
+                                note: self.plan_form.note.clone(),
+                                weekdays,
+                            };
+                            match self.api.upsert_shift_plan(&input) {
+                                Ok(_) => {
+                                    self.toast("Vardiya penceresi eklendi", false);
+                                    self.plan_form = ShiftPlanForm::default();
+                                    self.load_plans();
+                                }
+                                Err(e) => self.set_error(e),
+                            }
+                        } else {
+                            self.set_error("Önce kullanıcı seçin".into());
                         }
-                    } else {
-                        self.set_error("Önce kullanıcı seçin".into());
                     }
-                }
-            });
+                });
             ui.add_space(6.0);
         }
 
-        egui::Grid::new("plans_list").num_columns(7).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
-            for h in ["Personel", "Ay", "Aylık Gün", "Günlük Saat", "Açılış", "Kapanış", "Not"] {
+        // Plan listesi (herkes görür, salt-okunur)
+        let mut del: Option<i64> = None;
+        egui::Grid::new("plans_list").num_columns(6).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
+            for h in ["Personel", "Ay", "Günler", "Saatler", "Not", ""] {
                 ui.label(egui::RichText::new(h).strong());
             }
             ui.end_row();
-            for p in &self.plans {
+            let plans = self.plans.clone();
+            for p in &plans {
                 ui.label(&p.user_name);
                 ui.label(&p.month);
-                ui.label(format!("{} gün", p.work_days));
-                ui.label(format!("{:.1} saat", p.daily_hours));
-                ui.label(&p.start_time);
-                ui.label(&p.end_time);
+                ui.label(Self::weekday_names(&p.weekdays));
+                ui.label(egui::RichText::new(format!("{} — {}", p.start_time, p.end_time)).strong());
                 ui.label(egui::RichText::new(&p.note).small().weak());
+                if self.is_admin() && ui.small_button("Sil").clicked() {
+                    del = Some(p.id);
+                }
                 ui.end_row();
             }
         });
+        if let Some(id) = del {
+            match self.api.delete_shift_plan(id) {
+                Ok(_) => self.load_plans(),
+                Err(e) => self.set_error(e),
+            }
+        }
         if self.plans.is_empty() {
             ui.label(egui::RichText::new("Henüz vardiya planı tanımlanmadı.").small().weak());
         }
     }
 
-    /// Yönetici: gerçekleşen mesai gün/saat kaydı girer ve onaylar.
+    /// Yönetici: gerçekleşen mesai kaydı girer, çoklu seçip onaylar.
     fn shift_approval_tab(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("➕ Mesai Kaydı Ekle (Gün + Saat)").show(ui, |ui| {
             egui::Grid::new("att_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
@@ -2102,7 +2616,7 @@ impl App {
                 combo_index(ui, "att_user", &mut self.att_form.user_idx, &[], &refs);
                 ui.end_row();
                 ui.label("Tarih *");
-                ui.add(egui::TextEdit::singleline(&mut self.att_form.date).desired_width(120.0).hint_text("2026-11-08"));
+                Self::date_field(ui, &mut self.att_form.date, "GG-AA-YYYY");
                 ui.end_row();
                 ui.label("Çalışılan saat");
                 ui.add(egui::DragValue::new(&mut self.att_form.hours).range(0.0..=24.0).speed(0.5).suffix(" sa"));
@@ -2113,19 +2627,24 @@ impl App {
             });
             if ui.button("Kaydı Ekle").clicked() {
                 if let Some(u) = self.users.get(self.att_form.user_idx) {
-                    let input = ShiftAttendanceInput {
-                        user_id: u.id,
-                        date: self.att_form.date.trim().to_string(),
-                        hours: self.att_form.hours,
-                        note: self.att_form.note.clone(),
-                    };
-                    match self.api.upsert_attendance(&input) {
-                        Ok(_) => {
-                            self.toast("Mesai kaydı eklendi", false);
-                            self.att_form = ShiftAttendanceForm::default();
-                            self.load_attendance();
+                    match Self::iso_from_display(&self.att_form.date) {
+                        Some(iso) => {
+                            let input = ShiftAttendanceInput {
+                                user_id: u.id,
+                                date: iso,
+                                hours: self.att_form.hours,
+                                note: self.att_form.note.clone(),
+                            };
+                            match self.api.upsert_attendance(&input) {
+                                Ok(_) => {
+                                    self.toast("Mesai kaydı eklendi", false);
+                                    self.att_form = ShiftAttendanceForm::default();
+                                    self.load_attendance();
+                                }
+                                Err(e) => self.set_error(e),
+                            }
                         }
-                        Err(e) => self.set_error(e),
+                        None => self.set_error("Geçerli bir tarih giriniz (GG-AA-YYYY)".into()),
                     }
                 } else {
                     self.set_error("Önce kullanıcı seçin".into());
@@ -2134,16 +2653,60 @@ impl App {
         });
         ui.separator();
 
-        ui.label(egui::RichText::new("Onay kutucuğunu işaretleyerek mesaiyi onaylayın:").strong());
+        // Toplu onay araçları
+        ui.horizontal(|ui| {
+            if ui.button("✔ Seçilenleri Onayla").clicked() && !self.att_sel.is_empty() {
+                let ids = self.att_sel.clone();
+                match self.api.bulk_approve_attendance(&ids, true) {
+                    Ok(_) => {
+                        self.toast(format!("{} kayıt onaylandı", ids.len()), false);
+                        self.att_sel.clear();
+                        self.load_attendance();
+                    }
+                    Err(e) => self.set_error(e),
+                }
+            }
+            if ui.button("✖ Seçilenlerin Onayını Kaldır").clicked() && !self.att_sel.is_empty() {
+                let ids = self.att_sel.clone();
+                match self.api.bulk_approve_attendance(&ids, false) {
+                    Ok(_) => {
+                        self.toast(format!("{} kaydın onayı kaldırıldı", ids.len()), false);
+                        self.att_sel.clear();
+                        self.load_attendance();
+                    }
+                    Err(e) => self.set_error(e),
+                }
+            }
+            if ui.small_button("Tümünü Seç").clicked() {
+                self.att_sel = self.attendance.iter().map(|a| a.id).collect();
+            }
+            if ui.small_button("Seçimi Temizle").clicked() {
+                self.att_sel.clear();
+            }
+        });
+
         let mut toggle: Option<i64> = None;
-        egui::Grid::new("att_list").num_columns(5).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
-            for h in ["Personel", "Tarih", "Saat", "Onay", "Not"] {
+        egui::Grid::new("att_list").num_columns(6).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
+            for h in ["Seç", "Personel", "Tarih", "Saat", "Onay", "Not"] {
                 ui.label(egui::RichText::new(h).strong());
             }
             ui.end_row();
-            for a in &self.attendance {
+            let items = self.attendance.clone();
+            for a in &items {
+                let mut sel = self.att_sel.contains(&a.id);
+                if ui.checkbox(&mut sel, "").changed() {
+                    if sel {
+                        if !self.att_sel.contains(&a.id) {
+                            self.att_sel.push(a.id);
+                        }
+                    } else {
+                        self.att_sel.retain(|id| *id != a.id);
+                    }
+                }
                 ui.label(&a.user_name);
-                ui.label(&a.date);
+                // Tarihi GG-AA-YYYY göster
+                let disp = format!("{}-{}-{}", &a.date[8..10], &a.date[5..7], &a.date[0..4]);
+                ui.label(disp);
                 ui.label(format!("{:.1} sa", a.hours));
                 let mut approved = a.approved;
                 if ui.checkbox(&mut approved, "").changed() {
@@ -2161,6 +2724,149 @@ impl App {
         }
         if self.attendance.is_empty() {
             ui.label(egui::RichText::new("Henüz mesai kaydı yok.").small().weak());
+        }
+    }
+
+    /// Haftalık/aylık vardiya-mesai raporu (yönetici).
+    fn shift_report_tab(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Haftalık / Aylık Vardiya Raporu").strong());
+        ui.label(egui::RichText::new("Ay seçin, personeli işaretleyin; planlanan-gerçekleşen çalışma ve devam oranını PDF/CSV olarak alın.").small().weak());
+        ui.separator();
+
+        egui::Grid::new("rep_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label("Ay *");
+            ui.add(egui::TextEdit::singleline(&mut self.report_month).desired_width(120.0).hint_text("2026-11"));
+            ui.end_row();
+            ui.label("Personel *");
+            ui.horizontal_wrapped(|ui| {
+                for u in self.users.clone() {
+                    let name = if u.full_name.is_empty() { u.username.clone() } else { u.full_name.clone() };
+                    let mut sel = self.report_sel.contains(&u.id);
+                    if ui.checkbox(&mut sel, name).changed() {
+                        if sel {
+                            if !self.report_sel.contains(&u.id) {
+                                self.report_sel.push(u.id);
+                            }
+                        } else {
+                            self.report_sel.retain(|id| *id != u.id);
+                        }
+                    }
+                }
+            });
+            ui.end_row();
+        });
+        ui.horizontal(|ui| {
+            if ui.small_button("Tümünü Seç").clicked() {
+                self.report_sel = self.users.iter().map(|u| u.id).collect();
+            }
+            if ui.small_button("Seçimi Temizle").clicked() {
+                self.report_sel.clear();
+            }
+        });
+
+        let rows = self.compute_report_rows();
+        if !rows.is_empty() {
+            ui.add_space(8.0);
+            egui::Grid::new("rep_table").num_columns(7).striped(true).spacing([14.0, 5.0]).show(ui, |ui| {
+                for h in ["Personel", "Plan. Gün", "Plan. Saat", "Gerç. Gün", "Toplam Saat", "Onaylı", "Devam %"] {
+                    ui.label(egui::RichText::new(h).strong());
+                }
+                ui.end_row();
+                for r in &rows {
+                    ui.label(&r.name);
+                    ui.label(r.planned_days.to_string());
+                    ui.label(format!("{:.1}", r.planned_hours));
+                    ui.label(r.actual_days.to_string());
+                    ui.label(format!("{:.1}", r.actual_hours));
+                    ui.label(r.approved_days.to_string());
+                    ui.label(egui::RichText::new(format!("{:.0}%", r.rate())).color(
+                        if r.rate() >= 80.0 { egui::Color32::from_rgb(60, 160, 90) } else { egui::Color32::from_rgb(220, 140, 40) },
+                    ));
+                    ui.end_row();
+                }
+            });
+        }
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("📄 PDF Rapor Oluştur").clicked() {
+                self.export_report(&rows, "pdf");
+            }
+            if ui.button("📊 CSV Rapor Oluştur (Excel)").clicked() {
+                self.export_report(&rows, "csv");
+            }
+        });
+    }
+
+    fn compute_report_rows(&self) -> Vec<crate::export::ReportRow> {
+        let month = self.report_month.trim().to_string();
+        let days = Self::month_days(&month);
+        let mut rows = Vec::new();
+        for uid in &self.report_sel {
+            let user = match self.users.iter().find(|u| u.id == *uid) {
+                Some(u) => u,
+                None => continue,
+            };
+            let mut planned_days = 0i64;
+            let mut planned_hours = 0.0f64;
+            for p in self.plans.iter().filter(|p| p.user_id == *uid && p.month == month) {
+                let selected: Vec<usize> = p
+                    .weekdays
+                    .split(',')
+                    .filter_map(|x| x.trim().parse::<usize>().ok())
+                    .collect();
+                let dur = (Self::parse_hhmm(&p.end_time) - Self::parse_hhmm(&p.start_time)).max(0.0);
+                for d in &days {
+                    let wd = d.weekday().number_from_monday() as usize;
+                    if selected.contains(&wd) {
+                        planned_days += 1;
+                        planned_hours += dur;
+                    }
+                }
+            }
+            let mut actual_days = 0i64;
+            let mut actual_hours = 0.0f64;
+            let mut approved_days = 0i64;
+            for a in self.attendance.iter().filter(|a| a.user_id == *uid && a.date.starts_with(&month)) {
+                actual_days += 1;
+                actual_hours += a.hours;
+                if a.approved {
+                    approved_days += 1;
+                }
+            }
+            rows.push(crate::export::ReportRow {
+                name: if user.full_name.is_empty() { user.username.clone() } else { user.full_name.clone() },
+                planned_days,
+                planned_hours,
+                actual_days,
+                actual_hours,
+                approved_days,
+            });
+        }
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+        rows
+    }
+
+    fn export_report(&mut self, rows: &[crate::export::ReportRow], kind: &str) {
+        if rows.is_empty() {
+            self.set_error("Rapor için önce ay girip personel seçin".into());
+            return;
+        }
+        let dir = export_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let month = self.report_month.trim().to_string();
+        let safe_month = month.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect::<String>();
+        let result = if kind == "pdf" {
+            crate::export::export_shift_report_pdf(&dir.join(format!("vardiya-rapor-{safe_month}.pdf")), &month, rows)
+        } else {
+            crate::export::export_shift_report_csv(&dir.join(format!("vardiya-rapor-{safe_month}.csv")), &month, rows)
+        };
+        match result {
+            Ok(path) => {
+                self.toast(format!("Rapor oluşturuldu: {}", path.display()), false);
+                let _ = open::that(&path);
+            }
+            Err(e) => self.set_error(format!("Rapor oluşturulamadı: {e}")),
         }
     }
 
@@ -2503,11 +3209,13 @@ impl App {
         ui.heading("Ayarlar Paneli");
         ui.separator();
 
-        let tabs: [(SettingsTab, &str); 4] = [
+        let tabs: [(SettingsTab, &str); 6] = [
             (SettingsTab::View, "🎨 Görünüm"),
             (SettingsTab::Output, "📄 Çıktı"),
             (SettingsTab::Validation, "✅ Doğrulama"),
             (SettingsTab::Users, "🧑‍💼 Kullanıcılar"),
+            (SettingsTab::Help, "❓ Yardım İçerikleri"),
+            (SettingsTab::Test, "🧪 Sistem Testi"),
         ];
 
         ui.horizontal(|ui| {
@@ -2531,7 +3239,247 @@ impl App {
             SettingsTab::Output => self.settings_output_tab(ui),
             SettingsTab::Validation => self.settings_validation_tab(ui),
             SettingsTab::Users => self.settings_users_tab(ui),
+            SettingsTab::Help => self.settings_help_tab(ui),
+            SettingsTab::Test => self.settings_test_tab(ui),
         }
+    }
+
+    /// Yardım içeriklerini görüntüleme/düzenleme (yönetici).
+    fn settings_help_tab(&mut self, ui: &mut egui::Ui) {
+        if !self.is_admin() {
+            ui.label("Bu sekme yalnızca yöneticiye açıktır.");
+            return;
+        }
+        ui.label(egui::RichText::new("Ekran Yardım İçerikleri").strong());
+        ui.label(
+            egui::RichText::new("Her ekranın sağ üstündeki ? düğmesinde görünen açıklamalar. Düzenleyip kaydedin; değişiklik anında tüm kullanıcılara yansır.")
+                .small()
+                .weak(),
+        );
+        ui.separator();
+        if self.help_topics.is_empty() {
+            if ui.button("İçerikleri Yükle").clicked() {
+                self.load_help();
+            }
+            return;
+        }
+        let topics = self.help_topics.clone();
+        for t in topics {
+            egui::CollapsingHeader::new(format!("📄 {}", t.title)).show(ui, |ui| {
+                let mut title = t.title.clone();
+                let mut body = t.body.clone();
+                egui::Grid::new(format!("help_g_{}", t.key)).num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                    ui.label("Başlık");
+                    ui.add(egui::TextEdit::singleline(&mut title).desired_width(420.0));
+                    ui.end_row();
+                    ui.label("İçerik");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut body)
+                            .desired_width(420.0)
+                            .desired_rows(5)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    ui.end_row();
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("💾 Kaydet").clicked() {
+                        let topic = HelpTopic { key: t.key.clone(), title, body };
+                        match self.api.update_help(&topic) {
+                            Ok(_) => {
+                                self.toast("Yardım içeriği güncellendi", false);
+                                self.load_help();
+                            }
+                            Err(e) => self.set_error(e),
+                        }
+                    }
+                    ui.label(egui::RichText::new(format!("anahtar: {}", t.key)).small().weak());
+                });
+            });
+        }
+    }
+
+    /// Tek tuşla tüm modül testleri + sağlık/ajanda logu (yönetici).
+    fn settings_test_tab(&mut self, ui: &mut egui::Ui) {
+        if !self.is_admin() {
+            ui.label("Bu sekme yalnızca yöneticiye açıktır.");
+            return;
+        }
+        ui.label(egui::RichText::new("Sistem Testi ve Sağlık Kontrolü").strong());
+        ui.label(
+            egui::RichText::new("Sunucu bağlantısı, oturum, tüm modüller ve yerel ortam tek tuşla test edilir. Logu kopyalayıp yapay zekâya yapıştırarak çözüm adımları isteyebilirsiniz.")
+                .small()
+                .weak(),
+        );
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(egui::RichText::new("▶ Testi Çalıştır").strong())).clicked() {
+                self.run_system_tests();
+            }
+            if ui.button("📋 Kopyala").clicked() {
+                ui.ctx().copy_text(self.test_log.clone());
+                self.toast("Log panoya kopyalandı", false);
+            }
+            if ui.button("🗑 Temizle").clicked() {
+                self.test_log.clear();
+            }
+        });
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical().max_height(ui.available_height() - 10.0).show(ui, |ui| {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                if self.test_log.is_empty() {
+                    ui.label(egui::RichText::new("Henüz test çalıştırılmadı. '▶ Testi Çalıştır' düğmesine basın.").weak());
+                } else {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.test_log)
+                            .desired_width(ui.available_width() - 16.0)
+                            .desired_rows(24)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                }
+            });
+        });
+    }
+
+    fn run_system_tests(&mut self) {
+        use std::fmt::Write as _;
+        let mut log = String::new();
+        let _ = writeln!(log, "==== Gayrimenkul360 Sistem Testi ====");
+        let _ = writeln!(log, "Tarih: {}  |  Sürüm: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), env!("CARGO_PKG_VERSION"));
+        let _ = writeln!(log, "Sunucu: {}", self.api.base);
+        let mut passed = 0usize;
+        let mut total = 0usize;
+
+        let mut step = |log: &mut String, name: &str, ok: bool, detail: String, passed: &mut usize, total: &mut usize| {
+            *total += 1;
+            if ok {
+                *passed += 1;
+                let _ = writeln!(log, "[OK  ] {}  {}", name, detail);
+            } else {
+                let _ = writeln!(log, "[HATA] {}  {}", name, detail);
+            }
+        };
+
+        // 1) Sunucu bağlantısı + gecikme
+        let t0 = std::time::Instant::now();
+        let ok = self.api.health();
+        let ms = t0.elapsed().as_millis();
+        step(&mut log, "SUNUCU", ok, format!("bağlantı {} ms", ms), &mut passed, &mut total);
+
+        // 2) Oturum
+        match self.api.me() {
+            Ok(u) => { step(&mut log, "OTURUM", true, format!("{} ({})", u.username, u.role.label()), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "OTURUM", false, e, &mut passed, &mut total); }
+        }
+
+        // 3) Kullanıcılar
+        match self.api.list_users() {
+            Ok(us) => { step(&mut log, "KULLANICI", true, format!("{} kayıt", us.len()), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "KULLANICI", false, e, &mut passed, &mut total); }
+        }
+
+        // 4) Portföy listesi
+        match self.api.list_portfolios(None, None, None, None, None, None, None, false) {
+            Ok(ps) => { step(&mut log, "PORTFÖY", true, format!("{} kayıt", ps.len()), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "PORTFÖY", false, e, &mut passed, &mut total); }
+        }
+
+        // 5) Portföy yazma testi (oluştur → doğrula → mantıksal sil)
+        let ts = chrono::Local::now().format("%H%M%S").to_string();
+        let test_title = format!("[TEST] Sistem Kontrolü {ts}");
+        let input = PortfolioInput {
+            title: test_title.clone(),
+            listing_type: "satilik".into(),
+            category: "konut".into(),
+            status: "taslak".into(),
+            price: 1.0,
+            currency: "TRY".into(),
+            area_m2: 1.0,
+            area_net: 1.0,
+            ada_parsel: String::new(),
+            room_count: String::new(),
+            building_age: String::new(),
+            floor: String::new(),
+            total_floors: String::new(),
+            heating: String::new(),
+            furnished: false,
+            il: "Muğla".into(),
+            ilce: "Fethiye".into(),
+            mahalle: String::new(),
+            address: String::new(),
+            latitude: 0.0,
+            longitude: 0.0,
+            description: "Sistem testi tarafından oluşturuldu".into(),
+            owner_crm_id: None,
+        };
+        match self.api.create_portfolio(&input) {
+            Ok(p) => {
+                let verified = self.api.get_portfolio(p.id).map(|g| g.title == test_title).unwrap_or(false);
+                step(&mut log, "PORTFÖY-YAZ", verified, format!("id={} oluşturuldu ve doğrulandı", p.id), &mut passed, &mut total);
+                let _ = self.api.delete_portfolio(p.id);
+                let _ = writeln!(log, "[BİLGİ] Test portföyü mantıksal silindi; 'Silinmişleri göster' ile kalıcı temizleyebilirsiniz.");
+            }
+            Err(e) => { step(&mut log, "PORTFÖY-YAZ", false, e, &mut passed, &mut total); }
+        }
+
+        // 6) CRM
+        match self.api.list_crm(false) {
+            Ok(c) => { step(&mut log, "CRM", true, format!("{} kayıt", c.len()), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "CRM", false, e, &mut passed, &mut total); }
+        }
+
+        // 7) Görevler
+        match self.api.list_tasks() {
+            Ok(t) => { step(&mut log, "GÖREV", true, format!("{} kayıt", t.len()), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "GÖREV", false, e, &mut passed, &mut total); }
+        }
+
+        // 8) Hedefler
+        match self.api.list_goals() {
+            Ok(g) => { step(&mut log, "HEDEF", true, format!("{} kayıt", g.len()), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "HEDEF", false, e, &mut passed, &mut total); }
+        }
+
+        // 9) Vardiya
+        match self.api.list_shift_plans() {
+            Ok(p) => { step(&mut log, "VARDİYA", true, format!("{} plan satırı", p.len()), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "VARDİYA", false, e, &mut passed, &mut total); }
+        }
+        match self.api.list_attendance() {
+            Ok(a) => { step(&mut log, "MESAİ-KAYIT", true, format!("{} kayıt", a.len()), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "MESAİ-KAYIT", false, e, &mut passed, &mut total); }
+        }
+
+        // 10) Bildirimler
+        match self.api.list_notifications() {
+            Ok(n) => { step(&mut log, "BİLDİRİM", true, format!("{} kayıt", n.len()), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "BİLDİRİM", false, e, &mut passed, &mut total); }
+        }
+
+        // 11) Ayarlar
+        match self.api.get_settings() {
+            Ok(_) => { step(&mut log, "AYARLAR", true, "GET ok".into(), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "AYARLAR", false, e, &mut passed, &mut total); }
+        }
+
+        // 12) Yardım içerikleri
+        match self.api.list_help() {
+            Ok(h) => { step(&mut log, "YARDIM", true, format!("{} konu", h.len()), &mut passed, &mut total); }
+            Err(e) => { step(&mut log, "YARDIM", false, e, &mut passed, &mut total); }
+        }
+
+        // 13) Yerel ortam: yapılandırma yazılabilir mi, çıktı klasörü oluşabilir mi
+        let cfg_ok = std::fs::write(config_file(), "{}").is_ok();
+        step(&mut log, "YEREL-CONFIG", cfg_ok, config_file().display().to_string(), &mut passed, &mut total);
+        let dir_ok = std::fs::create_dir_all(export_dir()).is_ok();
+        step(&mut log, "YEREL-ÇIKTI", dir_ok, export_dir().display().to_string(), &mut passed, &mut total);
+
+        let _ = writeln!(log, "------------------------------------");
+        let _ = writeln!(log, "ÖZET: {passed}/{total} test geçti");
+        if passed != total {
+            let _ = writeln!(log, "Hata çözümü için bu logun tamamını kopyalayıp yapay zekâ asistanına yapıştırabilirsiniz.");
+        }
+        self.test_log = log;
+        self.test_running = false;
     }
 
     /// Görünüm sekmesi: tema ve ölçeklendirme (tüm kullanıcılara açık, yerel kayıtlı).
@@ -2558,8 +3506,75 @@ impl App {
                     self.theme = val.to_string();
                     self.local_theme_set = true;
                     self.apply_theme(&ctx);
+                    self.apply_accent(&ctx);
                     self.save_config();
                 }
+            }
+        });
+
+        ui.add_space(14.0);
+        ui.label("Yazı Tipi:");
+        egui::Grid::new("font_grid").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+            ui.label("Yazı Tipi Ailesi");
+            combo_index(
+                ui,
+                "font_family",
+                &mut self.font_family,
+                &[],
+                &["Roboto (önerilen)", "Sistem Fontu"],
+            );
+            ui.end_row();
+            ui.label("Yazı Boyutu (punto)");
+            let mut fs = self.font_size;
+            let resp = ui.add(
+                egui::Slider::new(&mut fs, 10.0..=24.0)
+                    .step_by(0.5)
+                    .text(format!("{:.1} pt", self.font_size)),
+            );
+            if resp.changed() {
+                self.font_size = fs;
+                self.apply_font_size(&ctx);
+                self.save_config();
+            }
+            ui.end_row();
+        });
+        if ui.selectable_label(self.font_family == 1, "Sistem fontuna geç").clicked() {
+            self.font_family = 1;
+            self.apply_fonts(&ctx);
+            self.apply_font_size(&ctx);
+            self.save_config();
+        } else if ui.selectable_label(self.font_family == 0, "Roboto'ya dön").clicked() {
+            self.font_family = 0;
+            self.apply_fonts(&ctx);
+            self.apply_font_size(&ctx);
+            self.save_config();
+        }
+
+        ui.add_space(14.0);
+        ui.label("Renk Teması:");
+        ui.horizontal_wrapped(|ui| {
+            let presets: [(&str, &str); 5] = [
+                ("blue", "🔵 Mavi"),
+                ("green", "🟢 Yeşil"),
+                ("gray", "⚪ Gri"),
+                ("orange", "🟠 Turuncu"),
+                ("purple", "🟣 Mor"),
+            ];
+            for (val, label) in presets {
+                if ui.selectable_label(self.accent == val, label).clicked() {
+                    self.accent = val.to_string();
+                    self.local_theme_set = true;
+                    self.apply_accent(&ctx);
+                    self.save_config();
+                }
+            }
+            if ui.button("⚪ Gri (Açık Tema)").clicked() {
+                self.accent = "gray".to_string();
+                self.theme = "light".to_string();
+                self.local_theme_set = true;
+                self.apply_theme(&ctx);
+                self.apply_accent(&ctx);
+                self.save_config();
             }
         });
 

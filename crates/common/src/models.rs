@@ -208,6 +208,10 @@ pub struct Portfolio {
     pub price: f64,
     pub currency: String,
     pub area_m2: f64,
+    #[serde(default)]
+    pub area_net: f64,
+    #[serde(default)]
+    pub ada_parsel: String,
     pub room_count: String,
     pub building_age: String,
     pub floor: String,
@@ -243,6 +247,10 @@ pub struct PortfolioInput {
     pub price: f64,
     pub currency: String,
     pub area_m2: f64,
+    #[serde(default)]
+    pub area_net: f64,
+    #[serde(default)]
+    pub ada_parsel: String,
     pub room_count: String,
     pub building_age: String,
     pub floor: String,
@@ -360,6 +368,9 @@ pub struct ShiftPlan {
     pub start_time: String,
     pub end_time: String,
     pub note: String,
+    /// Haftanın günleri (1=Pazartesi ... 7=Pazar), virgülle ayrılmış. Örn: "1,3,5"
+    #[serde(default)]
+    pub weekdays: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -371,6 +382,23 @@ pub struct ShiftPlanInput {
     pub start_time: String,
     pub end_time: String,
     pub note: String,
+    #[serde(default)]
+    pub weekdays: String,
+}
+
+/// Toplu mesai onayı (yönetici).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkApproveInput {
+    pub ids: Vec<Id>,
+    pub approved: bool,
+}
+
+/// Ekran yardım içeriği (yönetici düzenleyebilir).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HelpTopic {
+    pub key: String,
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

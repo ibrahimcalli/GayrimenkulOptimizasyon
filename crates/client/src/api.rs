@@ -287,6 +287,17 @@ impl Api {
     pub fn upsert_attendance(&self, r: &ShiftAttendanceInput) -> ApiResult<ShiftAttendance> {
         Self::handle(self.req(Method::POST, "/api/shift/attendance").json(r).send().map_err(net_err)?)
     }
+    pub fn delete_shift_plan(&self, id: i64) -> ApiResult<()> {
+        Self::handle_empty(self.req(Method::DELETE, &format!("/api/shift/plan/{id}")).send().map_err(net_err)?)
+    }
+    pub fn bulk_approve_attendance(&self, ids: &[i64], approved: bool) -> ApiResult<()> {
+        Self::handle_empty(
+            self.req(Method::POST, "/api/shift/attendance/approve")
+                .json(&BulkApproveInput { ids: ids.to_vec(), approved })
+                .send()
+                .map_err(net_err)?,
+        )
+    }
     pub fn toggle_attendance(&self, id: i64) -> ApiResult<()> {
         Self::handle_empty(
             self.req(Method::POST, &format!("/api/shift/attendance/{id}/toggle-approve"))
@@ -328,6 +339,14 @@ impl Api {
 
     pub fn file_url(&self, name: &str) -> String {
         self.url(&format!("/api/files/{name}"))
+    }
+
+    // ---------------- ekran yardımları ----------------
+    pub fn list_help(&self) -> ApiResult<Vec<HelpTopic>> {
+        Self::handle(self.req(Method::GET, "/api/help").send().map_err(net_err)?)
+    }
+    pub fn update_help(&self, t: &HelpTopic) -> ApiResult<()> {
+        Self::handle_empty(self.req(Method::PUT, "/api/help").json(t).send().map_err(net_err)?)
     }
 
     // ---------------- yedekleme ----------------
@@ -401,6 +420,10 @@ fn net_err(e: reqwest::Error) -> String {
         format!("Sunucuya bağlanılamadı ({}). Sunucu bilgisayarı açık mı ve adres doğru mu?", e)
     } else if e.is_timeout() {
         "Sunucu yanıt vermedi (zaman aşımı). Ağ bağlantısını kontrol edin.".to_string()
+    } else if e.is_body() || e.is_request() {
+        format!(
+            "Dosya aktarımı başarısız: {e}. Dosya çok büyük olabilir (sunucu sınırı 64 MB) veya bağlantı kesildi."
+        )
     } else {
         format!("Ağ hatası: {e}")
     }

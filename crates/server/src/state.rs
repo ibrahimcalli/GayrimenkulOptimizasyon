@@ -64,6 +64,8 @@ pub fn map_portfolio(row: &Row) -> rusqlite::Result<Portfolio> {
         price: row.get("price")?,
         currency: row.get("currency")?,
         area_m2: row.get("area_m2")?,
+        area_net: row.get::<_, Option<f64>>("area_net").unwrap_or(None).unwrap_or(0.0),
+        ada_parsel: row.get::<_, Option<String>>("ada_parsel").unwrap_or(None).unwrap_or_default(),
         room_count: row.get("room_count")?,
         building_age: row.get("building_age")?,
         floor: row.get("floor")?,
@@ -117,6 +119,7 @@ pub fn map_shift_plan(row: &Row) -> rusqlite::Result<ShiftPlan> {
         start_time: row.get("start_time")?,
         end_time: row.get("end_time")?,
         note: row.get("note")?,
+        weekdays: row.get::<_, Option<String>>("weekdays").unwrap_or(None).unwrap_or_default(),
     })
 }
 

@@ -59,9 +59,20 @@ fn build_lines(p: &Portfolio, owner: Option<&CrmRecord>, agent: &User, s: &Outpu
     v.push(("".into(), 0));
     if s.show_price {
         v.push((format!("Fiyat: {}", money(p)), 0));
+        if p.area_m2 > 0.0 {
+            v.push((format!("Tasinmaz m2 fiyati: {:.0} {}/m2", p.price / p.area_m2, p.currency), 0));
+        }
+    }
+    if !p.ada_parsel.is_empty() {
+        v.push((format!("Ada/Parsel: {}", p.ada_parsel), 0));
     }
     if p.area_m2 > 0.0 {
-        v.push((format!("Alan: {} m2", p.area_m2), 0));
+        let net = if p.area_net > 0.0 {
+            format!(" (Net: {} m2)", p.area_net)
+        } else {
+            String::new()
+        };
+        v.push((format!("Alan: {} m2 brut{}", p.area_m2, net), 0));
     }
     if !p.room_count.is_empty() {
         v.push((format!("Oda Sayısı: {}", p.room_count), 0));
@@ -462,6 +473,95 @@ impl PortfolioLabels for Portfolio {
     }
 }
 
+// =====================================================================
+// VARDİYA / MESAİ RAPORU
+// =====================================================================
+
+/// Raporda kişi başına satır.
+#[derive(Debug, Clone, Default)]
+pub struct ReportRow {
+    pub name: String,
+    pub planned_days: i64,
+    pub planned_hours: f64,
+    pub actual_days: i64,
+    pub actual_hours: f64,
+    pub approved_days: i64,
+}
+
+impl ReportRow {
+    pub fn rate(&self) -> f64 {
+        if self.planned_days > 0 {
+            (self.actual_days as f64 / self.planned_days as f64) * 100.0
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Vardiya/mesai raporunu PDF olarak üretir.
+pub fn export_shift_report_pdf(out_path: &Path, month: &str, rows: &[ReportRow]) -> Result<PathBuf, String> {
+    use printpdf::*;
+
+    let (doc, page, layer) = PdfDocument::new("Vardiya Raporu", Mm(297.0), Mm(210.0), "Katman 1");
+    let font = doc.add_builtin_font(BuiltinFont::Helvetica).map_err(|e| e.to_string())?;
+    let bold = doc.add_builtin_font(BuiltinFont::HelveticaBold).map_err(|e| e.to_string())?;
+    let lr = doc.get_page(page).get_layer(layer);
+
+    let mut y = 195.0_f32;
+    lr.use_text(tr_ascii(&format!("Vardiya / Mesai Raporu  -  {}", month)), 18.0, Mm(15.0), Mm(y), &bold);
+    y -= 12.0;
+    let header = format!(
+        "{:<22} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
+        "Personel", "Plan Gun", "Plan Saat", "Gercek Gun", "Toplam Saat", "Onayli", "Devam %"
+    );
+    lr.use_text(tr_ascii(&header), 10.0, Mm(15.0), Mm(y), &bold);
+    y -= 7.0;
+    for r in rows {
+        let line = format!(
+            "{:<22} {:>10} {:>10.1} {:>10} {:>10.1} {:>8} {:>7.0}%",
+            tr_ascii(&r.name),
+            r.planned_days,
+            r.planned_hours,
+            r.actual_days,
+            r.actual_hours,
+            r.approved_days,
+            r.rate()
+        );
+        lr.use_text(tr_ascii(&line), 10.0, Mm(15.0), Mm(y), &font);
+        y -= 7.0;
+        if y < 15.0 {
+            break;
+        }
+    }
+
+    let file = std::fs::File::create(out_path).map_err(|e| e.to_string())?;
+    let mut w = std::io::BufWriter::new(file);
+    doc.save(&mut w).map_err(|e| e.to_string())?;
+    w.flush().ok();
+    Ok(out_path.to_path_buf())
+}
+
+/// Vardiya/mesai raporunu CSV (Excel uyumlu, UTF-8 BOM + ; ayraç) olarak üretir.
+pub fn export_shift_report_csv(out_path: &Path, month: &str, rows: &[ReportRow]) -> Result<PathBuf, String> {
+    let mut out = String::from("\u{feff}");
+    out.push_str(&format!("Vardiya/Mesai Raporu;{}\n", month));
+    out.push_str("Personel;Planlanan Gun;Planlanan Saat;Gerceklesen Gun;Toplam Saat;Onayli Gun;Devam (%)\n");
+    for r in rows {
+        out.push_str(&format!(
+            "{};{};{:.1};{};{:.1};{};{:.0}\n",
+            r.name.replace(';', ","),
+            r.planned_days,
+            r.planned_hours,
+            r.actual_days,
+            r.actual_hours,
+            r.approved_days,
+            r.rate()
+        ));
+    }
+    std::fs::write(out_path, out.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(out_path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,6 +577,8 @@ mod tests {
             price: 12500000.0,
             currency: "TRY".into(),
             area_m2: 240.0,
+            area_net: 200.0,
+            ada_parsel: "Ada 412, Parsel 7".into(),
             room_count: "5+2".into(),
             building_age: "3".into(),
             floor: "2".into(),
@@ -605,6 +707,22 @@ mod tests {
         let doc = String::from_utf8_lossy(&doc_bytes);
         assert!(doc.contains("<w:tbl>"), "galeri tablosu yok");
         assert!(doc.contains("rIdImg5"), "5. resim referansı yok");
+    }
+
+    #[test]
+    fn shift_report_pdf_and_csv() {
+        let rows = vec![
+            ReportRow { name: "Ayşe Kaya".into(), planned_days: 20, planned_hours: 80.0, actual_days: 19, actual_hours: 76.0, approved_days: 18 },
+            ReportRow { name: "Mehmet Demir".into(), planned_days: 10, planned_hours: 40.0, actual_days: 10, actual_hours: 40.0, approved_days: 10 },
+        ];
+        let dir = std::env::temp_dir().join("g360_export_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = export_shift_report_pdf(&dir.join("rapor.pdf"), "2026-11", &rows).unwrap();
+        assert!(std::fs::read(&pdf).unwrap().starts_with(b"%PDF"));
+        let csv = export_shift_report_csv(&dir.join("rapor.csv"), "2026-11", &rows).unwrap();
+        let text = std::fs::read_to_string(&csv).unwrap();
+        assert!(text.contains("Ayşe Kaya;20;80.0;19;76.0;18;95"), "csv satırı hatalı");
+        assert!(text.starts_with('\u{feff}'), "BOM yok");
     }
 
     #[test]

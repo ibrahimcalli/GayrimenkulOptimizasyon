@@ -337,29 +337,29 @@ fn insert_portfolio(conn: &rusqlite::Connection, user: &User, input: &PortfolioI
     if let Some(pid) = id {
         conn.execute(
             "UPDATE portfolios SET title=?1, listing_type=?2, category=?3, status=?4, price=?5, currency=?6,
-             area_m2=?7, room_count=?8, building_age=?9, floor=?10, total_floors=?11, heating=?12, furnished=?13,
+             area_m2=?7, area_net=?24, ada_parsel=?25, room_count=?8, building_age=?9, floor=?10, total_floors=?11, heating=?12, furnished=?13,
              il=?14, ilce=?15, mahalle=?16, address=?17, latitude=?18, longitude=?19, description=?20, owner_crm_id=?21,
              updated_at=?22 WHERE id=?23",
             params![
                 input.title, input.listing_type, input.category, input.status, input.price, input.currency,
                 input.area_m2, input.room_count, input.building_age, input.floor, input.total_floors, input.heating,
                 input.furnished as i64, input.il, input.ilce, input.mahalle, input.address, input.latitude,
-                input.longitude, input.description, input.owner_crm_id, ts, pid
+                input.longitude, input.description, input.owner_crm_id, ts, pid, input.area_net, input.ada_parsel
             ],
         )
         .map_err(|e| internal(&e.to_string()))?;
         Ok(pid)
     } else {
         conn.execute(
-            "INSERT INTO portfolios (title, listing_type, category, status, price, currency, area_m2, room_count,
+            "INSERT INTO portfolios (title, listing_type, category, status, price, currency, area_m2, area_net, ada_parsel, room_count,
              building_age, floor, total_floors, heating, furnished, il, ilce, mahalle, address, latitude, longitude,
              description, owner_crm_id, created_by, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?23)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?24,?25,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?23)",
             params![
                 input.title, input.listing_type, input.category, input.status, input.price, input.currency,
                 input.area_m2, input.room_count, input.building_age, input.floor, input.total_floors, input.heating,
                 input.furnished as i64, input.il, input.ilce, input.mahalle, input.address, input.latitude,
-                input.longitude, input.description, input.owner_crm_id, user.id, ts
+                input.longitude, input.description, input.owner_crm_id, user.id, ts, input.area_net, input.ada_parsel
             ],
         )
         .map_err(|e| internal(&e.to_string()))?;
@@ -1014,15 +1014,11 @@ pub async fn upsert_shift_plan(
         return Err(bad_request("Ay zorunludur (örn. 2026-11)"));
     }
     let conn = state.db.lock().unwrap();
+    // Çoklu saat penceresi desteği: her kayıt ayrı bir satır (aynı personel/ay için birden fazla eklenebilir)
     conn.execute(
-        "DELETE FROM shift_plans WHERE user_id = ?1 AND month = ?2",
-        params![input.user_id, input.month],
-    )
-    .map_err(|e| internal(&e.to_string()))?;
-    conn.execute(
-        "INSERT INTO shift_plans (user_id, month, work_days, daily_hours, start_time, end_time, note)
-         VALUES (?1,?2,?3,?4,?5,?6,?7)",
-        params![input.user_id, input.month, input.work_days, input.daily_hours, input.start_time, input.end_time, input.note],
+        "INSERT INTO shift_plans (user_id, month, work_days, daily_hours, start_time, end_time, note, weekdays)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![input.user_id, input.month, input.work_days, input.daily_hours, input.start_time, input.end_time, input.note, input.weekdays],
     )
     .map_err(|e| internal(&e.to_string()))?;
     let id = conn.last_insert_rowid();
@@ -1106,6 +1102,33 @@ pub async fn upsert_attendance(
         )
         .map_err(|e| internal(&e.to_string()))?;
     Ok(Json(rec))
+}
+
+/// Vardiya planı satırını siler (yönetici).
+pub async fn delete_shift_plan(State(state): State<AppState>, _admin: AdminUser, Path(id): Path<i64>) -> ApiResult<Json<serde_json::Value>> {
+    let conn = state.db.lock().unwrap();
+    conn.execute("DELETE FROM shift_plans WHERE id = ?1", [id])
+        .map_err(|e| internal(&e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Seçilen mesai kayıtlarını toplu onaylar / onayı kaldırır (yönetici).
+pub async fn bulk_approve_attendance(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Json(input): Json<BulkApproveInput>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let conn = state.db.lock().unwrap();
+    let mut updated = 0i64;
+    for id in &input.ids {
+        let res = conn.execute(
+            "UPDATE shift_attendance SET approved = ?1, approved_by = ?2 WHERE id = ?3",
+            params![input.approved as i64, if input.approved { Some(admin.0.id) } else { None }, id],
+        )
+        .map_err(|e| internal(&e.to_string()))?;
+        updated += res as i64;
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "updated": updated })))
 }
 
 /// Yönetici mesai kaydını onaylar / onayı kaldırır.
@@ -1220,6 +1243,36 @@ pub async fn serve_file(State(state): State<AppState>, Path(name): Path<String>)
         }
         Err(_) => not_found("Dosya bulunamadı"),
     }
+}
+
+// =====================================================================
+// EKRAN YARDIM İÇERİKLERİ
+// =====================================================================
+
+pub async fn list_help(State(state): State<AppState>, _u: CurrentUser) -> ApiResult<Json<Vec<HelpTopic>>> {
+    let conn = state.db.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT key, title, body FROM help_topics ORDER BY key")
+        .map_err(|e| internal(&e.to_string()))?;
+    let list = stmt
+        .query_map([], |r| {
+            Ok(HelpTopic { key: r.get(0)?, title: r.get(1)?, body: r.get(2)? })
+        })
+        .map_err(|e| internal(&e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(Json(list))
+}
+
+pub async fn update_help(State(state): State<AppState>, _admin: AdminUser, Json(t): Json<HelpTopic>) -> ApiResult<Json<serde_json::Value>> {
+    let conn = state.db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO help_topics (key, title, body) VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET title = excluded.title, body = excluded.body",
+        params![t.key, t.title, t.body],
+    )
+    .map_err(|e| internal(&e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // =====================================================================

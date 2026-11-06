@@ -51,6 +51,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ("portfolios", "is_deleted", "INTEGER NOT NULL DEFAULT 0"),
         ("portfolios", "deleted_by_user_id", "INTEGER"),
         ("tasks", "is_deleted", "INTEGER NOT NULL DEFAULT 0"),
+        ("shift_plans", "weekdays", "TEXT NOT NULL DEFAULT ''"),
+        ("portfolios", "area_net", "REAL NOT NULL DEFAULT 0"),
+        ("portfolios", "ada_parsel", "TEXT NOT NULL DEFAULT ''"),
     ];
     for (table, name, ddl) in columns {
         if column_exists(conn, table, name) {
@@ -130,6 +133,8 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             price REAL NOT NULL DEFAULT 0,
             currency TEXT NOT NULL DEFAULT 'TRY',
             area_m2 REAL NOT NULL DEFAULT 0,
+            area_net REAL NOT NULL DEFAULT 0,
+            ada_parsel TEXT NOT NULL DEFAULT '',
             room_count TEXT NOT NULL DEFAULT '',
             building_age TEXT NOT NULL DEFAULT '',
             floor TEXT NOT NULL DEFAULT '',
@@ -182,7 +187,8 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             daily_hours REAL NOT NULL DEFAULT 8,
             start_time TEXT NOT NULL DEFAULT '09:00',
             end_time TEXT NOT NULL DEFAULT '18:00',
-            note TEXT NOT NULL DEFAULT ''
+            note TEXT NOT NULL DEFAULT '',
+            weekdays TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS shift_attendance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,6 +226,11 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             read INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS help_topics (
+            key TEXT PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT ''
+        );
         CREATE TABLE IF NOT EXISTS settings (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             show_name INTEGER NOT NULL DEFAULT 1,
@@ -252,6 +263,26 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
         "INSERT OR IGNORE INTO settings (id) VALUES (1)",
         [],
     )?;
+
+    // Varsayılan ekran yardım içerikleri (idempotent)
+    let seed: &[(&str, &str, &str)] = &[
+        ("welcome", "Portföyler (Karşılama)", "En güncelden en eskiye portföy listesi.\n\n• Görsel/Liste görünümü üstteki düğmelerle değişir (varsayılan: Görsel).\n• İlçe, tür ve durum filtrelerini kullanın; arama kutusuna yazıp Enter'a basın.\n• Admin: 'Silinmişleri göster' ile mantıksal silinen kayıtları görürsünüz.\n• Kısayol: Ctrl + fare tekerleği ile kart boyutunu değiştirin."),
+        ("portfolio_form", "Portföy Formu", "Tüm *'lı alanlar zorunludur.\n\n• İlçe ve mahalle ön tanımlı listeden seçilir.\n• Fiyata yazdığınız rakam binlik ayraçla otomatik biçimlenir; m² fiyatı otomatik hesaplanır.\n• Resimleri pencereye sürükleyip bırakabilir veya 'Resim Ekle' ile seçebilirsiniz; ilk resim kapak olur.\n• Konum: 'Haritada Seç' ile uydu görünümünde açıp koordinatı kopyalayıp yapıştırın; 'Mahalleyi Haritada Ara' ile Fethiye/mahalle araması yapılır.\n• Taşınmaz sahibi bilgisi CRM kaydı olarak saklanır (listesini yalnızca yönetici görür)."),
+        ("portfolio_detail", "Portföy Detayı", "Tüm bilgiler, resim galerisi ve çıktı işlemleri.\n\n• Resme tıklayınca büyütülür.\n• PDF/DOCX: tüm resimler ızgara olarak belgeye eklenir.\n• WhatsApp ile paylaşım ve haritada açma butonları buradadır.\n• Silme mantıksaldır; yönetici geri yükleyebilir."),
+        ("tasks", "Görevler", "Kişiye veya ekebe görev/not atarsınız.\n\n• Çoklu personel seçebilirsiniz; hiçbiri seçilmezse tüm ekibe gider.\n• Tarih alanı GG-AA-YYYY biçiminde otomatik tire ekler.\n• Atanan her kişiye bildirim düşer."),
+        ("goals", "Hedefler", "Kişiye/ekibe dönemsel hedefler. Gerçekleşme portföy kayıtlarından otomatik hesaplanır. Dönemi GG-AA-YYYY olarak girin."),
+        ("shifts", "Vardiya / Mesai", "3 sekme:\n\n• Vardiya Takvimi: haftanın günleri + saat penceresi atanır (aynı ay için birden fazla pencere eklenebilir). Herkes salt-okunur görür.\n• Mesai Onay Listesi: gerçekleşen gün/saat kaydı girilir, çoklu seçilip toplu onaylanır.\n• Vardiya Raporu: ay + personel seçilip PDF/CSV raporu alınır (devam yüzdesi dahil)."),
+        ("crm", "CRM Kayıtları", "Taşınmaz sahibi/müşteri kayıtları. Yalnızca yönetici görür.\n\n• Düzenle ile bilgileri güncelleyin; Fotoğraf ile 256x256 kare kırpılmış profil fotoğrafı yükleyin.\n• Görsel/Liste görünümü ve silinmişleri gösterme üstteki düğmelerdedir."),
+        ("users", "Kullanıcılar", "Çalışan hesapları ve rolleri (yönetici). Pasifleştirilen kullanıcı oturum açamaz."),
+        ("settings", "Ayarlar Paneli", "Sekmeler:\n\n• Görünüm: tema (karanlık/aydınlık/sistem), renk teması (Mavi/Yeşil/Gri/Turuncu/Mor), yazı tipi ailesi ve punto, yakınlaştırma (Ctrl +/-/0).\n• Çıktı: PDF/DOCX belgelerinde görünecek alanlar ve yeni kullanıcılar için varsayılan tema.\n• Doğrulama: form kuralları (min karakter, min fiyat/alan, telefon/e-posta zorunluluğu).\n• Kullanıcılar: hesap ve rol yönetimi.\n• Yardım İçerikleri: bu ekrandaki açıklamaları düzenleyin.\n• Sistem Testi: tüm modülleri tek tuşla test edin."),
+        ("profile", "Profilim", "Ad soyad, telefon, e-posta ve profil fotoğrafı. Bu bilgiler çıktı belgelerinin altında iletişim olarak görünür. Parolanızı buradan değiştirin."),
+    ];
+    for (key, title, body) in seed {
+        conn.execute(
+            "INSERT OR IGNORE INTO help_topics (key, title, body) VALUES (?1, ?2, ?3)",
+            params![key, title, body],
+        )?;
+    }
 
     // Varsayılan admin yoksa oluştur: admin / admin123
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM users WHERE role='admin'", [], |r| r.get(0))?;

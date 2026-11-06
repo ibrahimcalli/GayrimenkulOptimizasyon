@@ -6,6 +6,7 @@ mod state;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
@@ -93,6 +94,8 @@ async fn main() {
         // vardiya planı ve mesai onayı
         .route("/api/shift/plans", get(handlers::list_shift_plans))
         .route("/api/shift/plan", post(handlers::upsert_shift_plan))
+        .route("/api/shift/plan/:id", delete(handlers::delete_shift_plan))
+        .route("/api/shift/attendance/approve", post(handlers::bulk_approve_attendance))
         .route("/api/shift/attendance", get(handlers::list_attendance))
         .route("/api/shift/attendance", post(handlers::upsert_attendance))
         .route("/api/shift/attendance/:id/toggle-approve", post(handlers::toggle_attendance))
@@ -101,6 +104,8 @@ async fn main() {
         .route("/api/notifications/read-all", post(handlers::read_all_notifications))
         // ayarlar
         .route("/api/settings", get(handlers::get_settings).put(handlers::update_settings))
+        // ekran yardımları
+        .route("/api/help", get(handlers::list_help).put(handlers::update_help))
         // yedekleme (yalnızca admin)
         .route("/api/backup", get(handlers::backup))
         // dosyalar
@@ -111,6 +116,8 @@ async fn main() {
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
+        // Fotoğraf/resim yüklemeleri için varsayılan 2MB gövde sınırını 64MB'a çıkar
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
