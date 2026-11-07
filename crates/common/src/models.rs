@@ -398,6 +398,12 @@ pub struct BulkApproveInput {
     pub approved: bool,
 }
 
+/// Fotoğraf yüklemeyi bekleyen CRM kaydı için test girişi.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrmPhotoTestInput {
+    pub full_name: String,
+}
+
 /// Ekran yardım içeriği (yönetici düzenleyebilir).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelpTopic {

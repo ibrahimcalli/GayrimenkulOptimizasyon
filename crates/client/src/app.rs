@@ -104,6 +104,8 @@ pub struct CrmForm {
     pub address: String,
     pub owner_type: String,
     pub notes: String,
+    /// Yeni kayıtta seçilip kaydetme sonrası yüklenecek fotoğraf.
+    pub pending_photo: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Default)]
@@ -194,6 +196,9 @@ pub struct App {
     pub font_family: usize, // 0=Roboto 1=Sistem
     pub font_size: f64,     // gövde punto
     pub accent: String,     // "blue"|"green"|"gray"|"orange"|"purple"
+    pub bg_style: String,   // zemin teması
+    pub wallpaper: bool,    // degrade duvar kağıdı
+
     pub att_sel: Vec<i64>,
     pub report_sel: Vec<i64>,
     pub report_month: String,
@@ -273,8 +278,8 @@ const METRICS: [&str; 5] = [
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Türkçe karakter desteği: Roboto fontlarını varsayılan yap.
-        Self::install_roboto_fonts(&cc.egui_ctx);
+        // Türkçe karakter desteği: gömülü font ailelerini kur.
+        cc.egui_ctx.set_fonts(build_font_defs(0));
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         cc.egui_ctx.set_style(style);
@@ -346,6 +351,9 @@ impl App {
             font_family: cfg.font_family,
             font_size: if (10.0..=26.0).contains(&cfg.font_size) { cfg.font_size } else { 14.0 },
             accent: if cfg.accent.is_empty() { "blue".to_string() } else { cfg.accent },
+            bg_style: if cfg.bg_style.is_empty() { "default".to_string() } else { cfg.bg_style },
+            wallpaper: cfg.wallpaper,
+
             att_sel: Vec::new(),
             report_sel: Vec::new(),
             report_month: String::new(),
@@ -387,10 +395,39 @@ impl App {
         st.visuals.extreme_bg_color = if dark { egui::Color32::from_gray(24) } else { egui::Color32::from_gray(243) }; // TextEdit arka planı extreme_bg'den gelir
         st.visuals.faint_bg_color = if dark { egui::Color32::from_gray(32) } else { egui::Color32::from_gray(248) };
         st.visuals.widgets.inactive.weak_bg_fill = if dark { egui::Color32::from_gray(45) } else { egui::Color32::from_gray(235) };
+
+        // Zemin teması + duvar kağıdı
+        let transparent = egui::Color32::TRANSPARENT;
+        let (panel, faint, extreme) = match self.bg_style.as_str() {
+            "ocean" => if dark { ((14,27,43),(18,34,54),(10,20,33)) } else { ((223,236,246),(233,243,250),(210,228,242)) },
+            "forest" => if dark { ((15,32,26),(19,40,32),(11,26,20)) } else { ((224,240,230),(233,246,238),(210,234,220)) },
+            "royal" => if dark { ((26,20,40),(32,25,50),(20,15,32)) } else { ((233,226,245),(240,236,250),(224,215,240)) },
+            "sand" => if dark { ((38,32,26),(46,39,31),(30,25,20)) } else { ((246,238,224),(250,244,234),(240,230,212)) },
+            _ => if dark { ((32,32,32),(32,32,32),(24,24,24)) } else { ((239,239,239),(248,248,248),(243,243,243)) },
+        };
+        let c = |t: (u8,u8,u8)| egui::Color32::from_rgb(t.0, t.1, t.2);
+        if self.wallpaper {
+            st.visuals.panel_fill = transparent;
+            st.visuals.faint_bg_color = transparent;
+        } else {
+            st.visuals.panel_fill = c(panel);
+            st.visuals.faint_bg_color = c(faint);
+        }
+        st.visuals.extreme_bg_color = c(extreme);
         ctx.set_style(st);
     }
 
-    /// Yazı tipi ailesini uygular (Roboto gömülü / sistem fontu).
+    /// Duvar kağıdı degrade renkleri (sol üst -> sağ alt).
+    fn wallpaper_colors(&self) -> (egui::Color32, egui::Color32) {
+        match self.bg_style.as_str() {
+            "forest" => (egui::Color32::from_rgb(20, 52, 38), egui::Color32::from_rgb(8, 20, 16)),
+            "royal" => (egui::Color32::from_rgb(46, 32, 72), egui::Color32::from_rgb(16, 12, 30)),
+            "sand" => (egui::Color32::from_rgb(66, 54, 40), egui::Color32::from_rgb(28, 23, 18)),
+            _ => (egui::Color32::from_rgb(20, 38, 62), egui::Color32::from_rgb(8, 14, 26)),
+        }
+    }
+
+    /// Yazı tipi ailesini uygular (5 gömülü aile / sistem fontu). Tümü Türkçe destekli.
     fn apply_fonts(&self, ctx: &egui::Context) {
         match self.font_family {
             1 => {
@@ -401,7 +438,7 @@ impl App {
                 );
                 ctx.set_fonts(f);
             }
-            _ => Self::install_roboto_fonts(ctx),
+            n => ctx.set_fonts(build_font_defs(n)),
         }
     }
 
@@ -502,6 +539,8 @@ impl App {
             font_family: self.font_family,
             font_size: self.font_size,
             accent: self.accent.clone(),
+            bg_style: self.bg_style.clone(),
+            wallpaper: self.wallpaper,
         };
         if let Ok(s) = serde_json::to_string_pretty(&cfg) {
             let _ = std::fs::write(config_file(), s);
@@ -544,8 +583,13 @@ impl App {
     }
 
     fn load_help(&mut self) {
-        if let Ok(h) = self.api.list_help() {
-            self.help_topics = h;
+        match self.api.list_help() {
+            Ok(h) => self.help_topics = h,
+            Err(e) => {
+                self.set_error(format!(
+                    "Yardım içerikleri yüklenemedi: {e}. Sunucu eski sürümdeyse yeniden başlatın."
+                ));
+            }
         }
     }
 
@@ -785,37 +829,6 @@ fn month_days(month: &str) -> Vec<chrono::NaiveDate> {
     out
 }
 
-/// Türkçe karakter kümesini (ç ğ ı ö ş ü İ Ğ Ş) tam destekleyen font kurulumu.
-/// Roboto tüm metinlerde öncelikli kullanılır; emoji/ikon fontları yedekte kalır.
-fn install_roboto_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "roboto_regular".to_string(),
-        egui::FontData::from_static(include_bytes!("../../../assets/fonts/Roboto-Regular.ttf")),
-    );
-    fonts.font_data.insert(
-        "roboto_bold".to_string(),
-        egui::FontData::from_static(include_bytes!("../../../assets/fonts/Roboto-Bold.ttf")),
-    );
-
-    // Proportional ailesinde Roboto'yu en başa al (başlıklar Bold'la, gövde Regular'la)
-    let prop = fonts.families.entry(egui::FontFamily::Proportional).or_default();
-    prop.insert(0, "roboto_bold".to_string());
-    prop.insert(0, "roboto_regular".to_string());
-
-    let mono = fonts.families.entry(egui::FontFamily::Monospace).or_default();
-    mono.push("roboto_regular".to_string());
-
-    // Menü için bold aile
-    fonts.families.insert(
-        egui::FontFamily::Name("navbold".into()),
-        vec!["roboto_bold".to_string(), "roboto_regular".to_string()],
-    );
-
-    ctx.set_fonts(fonts);
-}
-
-
     /// Ağ durumunu ve otomatik senkronizasyonu yönetir.
     fn tick_sync(&mut self, ctx: &egui::Context) {
         let t = ctx.input(|i| i.time);
@@ -823,8 +836,6 @@ fn install_roboto_fonts(ctx: &egui::Context) {
             self.last_health = t;
             self.connected = self.api.health();
         }
-        // Karşılama ekranındayken diğer kullanıcıların eklediği portföyler
-        // otomatik olarak periyodik yenilenir (senkronizasyon).
         if self.user.is_some() && self.screen == Screen::Welcome && t - self.last_auto_refresh > 15.0 {
             self.last_auto_refresh = t;
             self.load_portfolios();
@@ -869,7 +880,23 @@ impl eframe::App for App {
             self.side_panel(ctx);
         }
 
-        let panel_frame = egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(16.0, 12.0));
+        // Duvar kağıdı: arka plan katmanına degrade
+        if self.wallpaper {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            let r = ctx.screen_rect();
+            let (c1, c2) = self.wallpaper_colors();
+            let mut mesh = egui::Mesh::default();
+            mesh.colored_vertex(r.left_top(), c1);
+            mesh.colored_vertex(r.right_top(), c2);
+            mesh.colored_vertex(r.right_bottom(), c2);
+            mesh.colored_vertex(r.left_bottom(), c1);
+            mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+            painter.add(egui::Shape::mesh(mesh));
+        }
+        let mut panel_frame = egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(16.0, 12.0));
+        if self.wallpaper {
+            panel_frame = panel_frame.fill(egui::Color32::TRANSPARENT);
+        }
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             match self.screen {
                 Screen::Login => self.login_screen(ui),
@@ -1100,24 +1127,36 @@ impl App {
 
     fn side_panel(&mut self, ctx: &egui::Context) {
         let mut target: Option<Screen> = None;
+        // Bana atanmış açık görev sayısı (rozet)
+        let my_task_badge = self
+            .user
+            .as_ref()
+            .map(|u| {
+                self.tasks
+                    .iter()
+                    .filter(|t| !t.done && t.assigned_to_ids.contains(&u.id))
+                    .count()
+            })
+            .unwrap_or(0);
+        let badge_for = |scr: Screen| -> usize { if scr == Screen::Tasks { my_task_badge } else { 0 } };
         egui::SidePanel::left("nav")
             .resizable(false)
             .default_width(190.0)
             .show(ctx, |ui| {
                 ui.add_space(8.0);
-                nav_button(ui, &mut target, self.screen, Screen::Welcome, "🏢", "Portföyler", egui::Color32::from_rgb(86, 156, 214));
-                nav_button(ui, &mut target, self.screen, Screen::PortfolioForm, "➕", "Yeni Portföy", egui::Color32::from_rgb(106, 190, 110));
-                nav_button(ui, &mut target, self.screen, Screen::Tasks, "✅", "Görevler", egui::Color32::from_rgb(230, 160, 66));
-                nav_button(ui, &mut target, self.screen, Screen::Goals, "🎯", "Hedefler", egui::Color32::from_rgb(186, 110, 220));
-                nav_button(ui, &mut target, self.screen, Screen::Shifts, "🕒", "Vardiya / Mesai", egui::Color32::from_rgb(80, 190, 190));
+                nav_button(ui, &mut target, self.screen, Screen::Welcome, "🏢", "Portföyler", egui::Color32::from_rgb(86, 156, 214), badge_for(Screen::Welcome));
+                nav_button(ui, &mut target, self.screen, Screen::PortfolioForm, "➕", "Yeni Portföy", egui::Color32::from_rgb(106, 190, 110), badge_for(Screen::PortfolioForm));
+                nav_button(ui, &mut target, self.screen, Screen::Tasks, "✅", "Görevler", egui::Color32::from_rgb(230, 160, 66), badge_for(Screen::Tasks));
+                nav_button(ui, &mut target, self.screen, Screen::Goals, "🎯", "Hedefler", egui::Color32::from_rgb(186, 110, 220), badge_for(Screen::Goals));
+                nav_button(ui, &mut target, self.screen, Screen::Shifts, "🕒", "Vardiya / Mesai", egui::Color32::from_rgb(80, 190, 190), badge_for(Screen::Shifts));
                 ui.separator();
                 if self.is_admin() {
-                    nav_button(ui, &mut target, self.screen, Screen::Crm, "👥", "CRM Kayıtları", egui::Color32::from_rgb(120, 140, 220));
-                    nav_button(ui, &mut target, self.screen, Screen::Users, "🧑", "Kullanıcılar", egui::Color32::from_rgb(200, 130, 180));
+                    nav_button(ui, &mut target, self.screen, Screen::Crm, "👥", "CRM Kayıtları", egui::Color32::from_rgb(120, 140, 220), badge_for(Screen::Crm));
+                    nav_button(ui, &mut target, self.screen, Screen::Users, "🧑", "Kullanıcılar", egui::Color32::from_rgb(200, 130, 180), badge_for(Screen::Users));
                     ui.separator();
                 }
-                nav_button(ui, &mut target, self.screen, Screen::Settings, "⚙", "Ayarlar", egui::Color32::from_rgb(160, 160, 170));
-                nav_button(ui, &mut target, self.screen, Screen::Profile, "👤", "Profilim", egui::Color32::from_rgb(150, 190, 120));
+                nav_button(ui, &mut target, self.screen, Screen::Settings, "⚙", "Ayarlar", egui::Color32::from_rgb(160, 160, 170), badge_for(Screen::Settings));
+                nav_button(ui, &mut target, self.screen, Screen::Profile, "👤", "Profilim", egui::Color32::from_rgb(150, 190, 120), badge_for(Screen::Profile));
                 ui.add_space(10.0);
                 ui.separator();
                 ui.label(egui::RichText::new(format!("Portföy: {}", self.portfolios.len())).small());
@@ -1234,6 +1273,7 @@ fn nav_button(
     icon: &str,
     label: &str,
     color: egui::Color32,
+    badge: usize,
 ) {
     let selected = current == to;
     let w = ui.available_width();
@@ -1262,9 +1302,22 @@ fn nav_button(
         egui::FontId::new(13.5, egui::FontFamily::Name("navbold".into())),
         if selected { v.strong_text_color() } else { v.text_color() },
     );
+    if badge > 0 {
+        let c = egui::pos2(rect.right() - 18.0, rect.center().y);
+        p.circle_filled(c, 9.0, egui::Color32::from_rgb(214, 69, 69));
+        p.text(c, egui::Align2::CENTER_CENTER, badge.to_string(), egui::FontId::proportional(11.0), egui::Color32::WHITE);
+    }
     if resp.clicked() {
         *target = Some(to);
     }
+}
+
+/// Görev son tarihi için kalan gün sayısı (due_at: "YYYY-MM-DD[ HH:MM]").
+fn days_until(due_at: &str) -> Option<i64> {
+    let date_part = due_at.split(' ').next()?;
+    let due = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d").ok()?;
+    let today = chrono::Local::now().date_naive();
+    Some((due - today).num_days())
 }
 
 /// Boşluk tuşuna basılınca ayraç ekler: "412 " -> "412/"
@@ -1326,6 +1379,10 @@ struct ClientConfig {
     font_size: f64,
     #[serde(default)]
     accent: String,
+    #[serde(default)]
+    bg_style: String,
+    #[serde(default)]
+    wallpaper: bool,
 }
 
 fn d_font_size() -> f64 { 14.0 }
@@ -1716,9 +1773,8 @@ impl App {
                 ui.end_row();
 
                 ui.label("Açık Adres");
-                let before = self.form.address.clone();
-                ui.add(egui::TextEdit::singleline(&mut self.form.address).desired_width(360.0));
-                if self.form.address != before {
+                let resp = ui.add(egui::TextEdit::singleline(&mut self.form.address).desired_width(360.0));
+                if resp.lost_focus() {
                     self.form.address = tr_title_case(&self.form.address);
                 }
                 ui.end_row();
@@ -1803,7 +1859,10 @@ impl App {
             if self.form.owner_choice == 1 {
                 egui::Grid::new("owner_grid").num_columns(2).show(ui, |ui| {
                     ui.label("Ad Soyad *");
-                    ui.add(egui::TextEdit::singleline(&mut self.form.new_owner_name).desired_width(300.0));
+                    let resp = ui.add(egui::TextEdit::singleline(&mut self.form.new_owner_name).desired_width(300.0));
+                    if resp.lost_focus() {
+                        self.form.new_owner_name = tr_title_case(&self.form.new_owner_name);
+                    }
                     ui.end_row();
                     ui.label("Telefon");
                     ui.add(egui::TextEdit::singleline(&mut self.form.new_owner_phone).desired_width(300.0));
@@ -2360,6 +2419,7 @@ impl App {
     fn tasks_screen(&mut self, ui: &mut egui::Ui) {
         ui.heading("Görevler ve Sorumluluklar");
         ui.separator();
+        egui::ScrollArea::vertical().id_salt("tasks_scroll").show(ui, |ui| {
         let mut refresh = false;
 
         egui::CollapsingHeader::new("➕ Yeni Görev / Not Ata")
@@ -2478,6 +2538,18 @@ impl App {
                                         .small()
                                         .color(egui::Color32::from_rgb(200, 120, 40)),
                                 );
+                                match days_until(&t.due_at) {
+                                    Some(d) if d > 0 => {
+                                        ui.label(egui::RichText::new(format!("⏳ {} gün kaldı", d)).small().color(egui::Color32::from_rgb(90, 170, 90)));
+                                    }
+                                    Some(0) => {
+                                        ui.label(egui::RichText::new("⏳ bugün son gün").small().color(egui::Color32::from_rgb(230, 140, 40)));
+                                    }
+                                    Some(d) => {
+                                        ui.label(egui::RichText::new(format!("⚠ {} gün geçti", -d)).small().color(egui::Color32::from_rgb(220, 80, 80)));
+                                    }
+                                    None => {}
+                                }
                             }
                             ui.label(egui::RichText::new(format!("Öncelik: {}", t.priority)).small().weak());
                             ui.label(egui::RichText::new(format!("Veren: {}", t.assigned_by_name)).small().weak());
@@ -2505,11 +2577,13 @@ impl App {
         if refresh {
             self.load_tasks();
         }
+        });
     }
 
     fn goals_screen(&mut self, ui: &mut egui::Ui) {
         ui.heading("Hedefler");
         ui.separator();
+        egui::ScrollArea::vertical().id_salt("goals_scroll").show(ui, |ui| {
         let mut refresh = false;
 
         if self.is_admin() {
@@ -2620,6 +2694,7 @@ impl App {
         if refresh {
             self.load_goals();
         }
+        });
     }
 
     fn shifts_screen(&mut self, ui: &mut egui::Ui) {
@@ -2644,11 +2719,14 @@ impl App {
         });
         ui.separator();
 
-        match self.shift_tab {
-            0 => self.shift_plans_tab(ui),
-            1 => self.shift_approval_tab(ui),
-            _ => self.shift_report_tab(ui),
-        }
+        let tab_id = format!("shift_scroll_{}", self.shift_tab);
+        egui::ScrollArea::vertical().id_salt(tab_id).show(ui, |ui| {
+            match self.shift_tab {
+                0 => self.shift_plans_tab(ui),
+                1 => self.shift_approval_tab(ui),
+                _ => self.shift_report_tab(ui),
+            }
+        });
     }
 
     /// Vardiya takvimi: kullanıcılar planı salt-okunur görür; düzenleme yöneticide.
@@ -3057,6 +3135,7 @@ impl App {
             });
         });
         ui.separator();
+        egui::ScrollArea::vertical().id_salt("crm_scroll").show(ui, |ui| {
         let mut refresh = false;
 
         // Kayıt / düzenleme formu
@@ -3064,41 +3143,34 @@ impl App {
         let title = if editing { format!("✏ Düzenle: #{}", self.crm_form.edit_id.unwrap()) } else { "➕ Yeni CRM Kaydı".to_string() };
         egui::CollapsingHeader::new(title).default_open(editing).show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Profil fotoğrafı (düzenleme modunda)
+                // Profil fotoğrafı (yeni ve düzenleme modunda)
                 ui.vertical(|ui| {
-                    if let Some(photo) = self.crm_photo_texture(ctx) {
+                    if let Some(tex) = self.crm_photo_texture(ctx) {
                         ui.add(
-                            egui::Image::new(egui::load::SizedTexture::new(photo.id(), egui::vec2(84.0, 84.0)))
+                            egui::Image::new(egui::load::SizedTexture::new(tex.id(), egui::vec2(84.0, 84.0)))
                                 .rounding(egui::Rounding::same(42.0)),
                         );
                     } else {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(84.0, 84.0), egui::Sense::hover());
                         ui.painter_at(rect).rect_filled(rect, 42.0, egui::Color32::from_gray(70));
                     }
-                    if editing && ui.small_button("Fotoğraf").clicked() {
+                    if ui.small_button("Fotoğraf Seç").clicked() {
                         if let Some(files) = pick_files() {
                             if let Some(f) = files.into_iter().next() {
-                                let id = self.crm_form.edit_id.unwrap();
-                                match self.api.upload_crm_photo(id, &f) {
-                                    Ok(rec) => {
-                                        if let Some(p) = &rec.photo {
-                                            self.textures.remove(p);
-                                        }
-                                        self.toast("Profil fotoğrafı güncellendi (256×256 kırpıldı)", false);
-                                        refresh = true;
-                                    }
-                                    Err(e) => self.set_error(e),
-                                }
+                                self.crm_form.pending_photo = Some(f);
                             }
                         }
                     }
+                    if self.crm_form.pending_photo.is_some() && ui.small_button("Fotoğrafı Kaldır").clicked() {
+                        self.crm_form.pending_photo = None;
+                    }
+                    ui.label(egui::RichText::new("Kayıtta 256×256 kırpılır").small().weak());
                 });
                 ui.add_space(8.0);
                 egui::Grid::new("crm_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                     ui.label("Ad Soyad *");
-                    let before = self.crm_form.full_name.clone();
-                    ui.add(egui::TextEdit::singleline(&mut self.crm_form.full_name).desired_width(300.0));
-                    if self.crm_form.full_name != before {
+                    let resp = ui.add(egui::TextEdit::singleline(&mut self.crm_form.full_name).desired_width(300.0));
+                    if resp.lost_focus() {
                         self.crm_form.full_name = tr_title_case(&self.crm_form.full_name);
                     }
                     ui.end_row();
@@ -3139,6 +3211,23 @@ impl App {
                         };
                         match result {
                             Ok(_) => {
+                                // Bekleyen fotoğrafı yükle (yeni kayıtta id kaydetme sonrası alınır)
+                                if let Some(photo) = self.crm_form.pending_photo.clone() {
+                                    let target_id = if editing {
+                                        self.crm_form.edit_id
+                                    } else {
+                                        self.api.list_crm(false).ok().and_then(|l| l.first().map(|r| r.id))
+                                    };
+                                    if let Some(pid) = target_id {
+                                        match self.api.upload_crm_photo(pid, &photo) {
+                                            Ok(rec) => {
+                                                if let Some(p) = &rec.photo { self.textures.remove(p); }
+                                                self.toast("Fotoğraf yüklendi (256×256 kırpıldı)", false);
+                                            }
+                                            Err(e) => self.set_error(format!("Fotoğraf yüklenemedi: {e}")),
+                                        }
+                                    }
+                                }
                                 self.toast(if editing { "CRM kaydı güncellendi" } else { "CRM kaydı eklendi" }, false);
                                 self.crm_form = CrmForm::default();
                                 refresh = true;
@@ -3199,6 +3288,7 @@ impl App {
                                             address: c.address.clone(),
                                             owner_type: c.owner_type.clone(),
                                             notes: c.notes.clone(),
+                                            pending_photo: None,
                                         };
                                     }
                                     if !c.is_deleted && ui.small_button("Sil").clicked() {
@@ -3253,6 +3343,7 @@ impl App {
                                 address: c.address.clone(),
                                 owner_type: c.owner_type.clone(),
                                 notes: c.notes.clone(),
+                                pending_photo: None,
                             };
                         }
                         if !c.is_deleted && ui.small_button("Sil").clicked() {
@@ -3279,10 +3370,28 @@ impl App {
         if refresh {
             self.load_crm();
         }
+        });
     }
 
-    /// Düzenleme formundaki CRM fotoğrafının dokusu.
+    /// CRM formundaki fotoğrafın dokusu: önce bekleyen yerel dosya, sonra sunucudaki.
     fn crm_photo_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        if let Some(path) = &self.crm_form.pending_photo {
+            let key = format!("pending:{}", path.display());
+            if let Some(t) = self.textures.get(&key) {
+                return Some(t.clone());
+            }
+            if let Ok(bytes) = std::fs::read(path) {
+                if let Ok(img) = image::load_from_memory(&bytes) {
+                    let thumb = img.thumbnail(256, 256).to_rgba8();
+                    let (w, h) = thumb.dimensions();
+                    let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], thumb.as_raw());
+                    let tex = ctx.load_texture(key.clone(), color, egui::TextureOptions::LINEAR);
+                    self.textures.insert(key, tex.clone());
+                    return Some(tex);
+                }
+            }
+            return None;
+        }
         let photo = self.crm_form.edit_id
             .and_then(|id| self.crm.iter().find(|c| c.id == id))
             .and_then(|c| c.photo.clone())?;
@@ -3302,7 +3411,9 @@ impl App {
         }
         ui.heading("Kullanıcılar (Çalışanlar)");
         ui.separator();
-        self.users_manager_ui(ui);
+        egui::ScrollArea::vertical().id_salt("users_scroll").show(ui, |ui| {
+            self.users_manager_ui(ui);
+        });
     }
 
     /// Kullanıcı yönetimi (ayarlar panelindeki sekmeden de kullanılır).
@@ -3403,14 +3514,22 @@ impl App {
         });
         ui.separator();
 
-        match self.settings_tab {
-            SettingsTab::View => self.settings_view_tab(ui),
-            SettingsTab::Output => self.settings_output_tab(ui),
-            SettingsTab::Validation => self.settings_validation_tab(ui),
-            SettingsTab::Users => self.settings_users_tab(ui),
-            SettingsTab::Help => self.settings_help_tab(ui),
-            SettingsTab::Test => self.settings_test_tab(ui),
+        // Test sekmesi kendi scroll'una sahip; diğerlerinde uzun içerik kaydırılabilir olsun
+        if self.settings_tab == SettingsTab::Test {
+            self.settings_test_tab(ui);
+            return;
         }
+        let tab_id = format!("settings_scroll_{}", self.settings_tab as usize);
+        egui::ScrollArea::vertical().id_salt(tab_id).show(ui, |ui| {
+            match self.settings_tab {
+                SettingsTab::View => self.settings_view_tab(ui),
+                SettingsTab::Output => self.settings_output_tab(ui),
+                SettingsTab::Validation => self.settings_validation_tab(ui),
+                SettingsTab::Users => self.settings_users_tab(ui),
+                SettingsTab::Help => self.settings_help_tab(ui),
+                SettingsTab::Test => unreachable!(),
+            }
+        });
     }
 
     /// Yardım içeriklerini görüntüleme/düzenleme (yönetici).
@@ -3429,6 +3548,9 @@ impl App {
         if self.help_topics.is_empty() {
             if ui.button("İçerikleri Yükle").clicked() {
                 self.load_help();
+                if self.help_topics.is_empty() && self.error.is_none() {
+                    self.set_error("İçerik boş döndü. Sunucunun güncel sürümde çalıştığından emin olun.".into());
+                }
             }
             return;
         }
@@ -3633,7 +3755,50 @@ impl App {
         // 12) Yardım içerikleri
         match self.api.list_help() {
             Ok(h) => { step(&mut log, "YARDIM", true, format!("{} konu", h.len()), &mut passed, &mut total); }
-            Err(e) => { step(&mut log, "YARDIM", false, e, &mut passed, &mut total); }
+            Err(e) => {
+                step(&mut log, "YARDIM", false, format!("{e}  (sunucu eski sürümdeyse yeniden başlatın — /api/help yeni eklendi)"), &mut passed, &mut total);
+            }
+        }
+
+        // 12b) Font altyapısı
+        let font_ok = !build_font_defs(0).font_data.is_empty();
+        step(&mut log, "FONT", font_ok, format!("gömülü aileler: {}", FONT_NAMES.join(", ")), &mut passed, &mut total);
+
+        // 12c) CRM fotoğraf yükleme testi (küçük PNG üret → yükle → doğrula → sil)
+        let ts2 = chrono::Local::now().format("%H%M%S").to_string();
+        let crm_in = CrmInput {
+            full_name: format!("[TEST] Foto {ts2}"),
+            phone: String::new(),
+            email: String::new(),
+            address: String::new(),
+            owner_type: "Sahip".into(),
+            notes: String::new(),
+        };
+        match self.api.create_crm(&crm_in) {
+            Ok(c) => {
+                let img = image::RgbImage::from_fn(64, 64, |x, y| {
+                    image::Rgb([(x * 4) as u8, (y * 4) as u8, 128])
+                });
+                let mut buf = std::io::Cursor::new(Vec::new());
+                let _ = img.write_to(&mut buf, image::ImageFormat::Png);
+                let tmp = std::env::temp_dir().join("g360_test_photo.png");
+                let _ = std::fs::write(&tmp, buf.into_inner());
+                match self.api.upload_crm_photo(c.id, &tmp) {
+                    Ok(rec) if rec.photo.is_some() => {
+                        step(&mut log, "CRM-FOTO", true, format!("id={} 256x256 kırpma ok", c.id), &mut passed, &mut total);
+                    }
+                    Ok(_) => {
+                        step(&mut log, "CRM-FOTO", false, "sunucu fotoğraf döndürmedi".into(), &mut passed, &mut total);
+                    }
+                    Err(e) => {
+                        step(&mut log, "CRM-FOTO", false, e, &mut passed, &mut total);
+                    }
+                }
+                let _ = self.api.delete_crm(c.id);
+            }
+            Err(e) => {
+                step(&mut log, "CRM-FOTO", false, format!("CRM oluşturulamadı: {e}"), &mut passed, &mut total);
+            }
         }
 
         // 13) Yerel ortam: yapılandırma yazılabilir mi, çıktı klasörü oluşabilir mi
@@ -3685,13 +3850,7 @@ impl App {
         ui.label("Yazı Tipi:");
         egui::Grid::new("font_grid").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
             ui.label("Yazı Tipi Ailesi");
-            combo_index(
-                ui,
-                "font_family",
-                &mut self.font_family,
-                &[],
-                &["Roboto (önerilen)", "Sistem Fontu"],
-            );
+            combo_index(ui, "font_family", &mut self.font_family, &[], &FONT_NAMES);
             ui.end_row();
             ui.label("Yazı Boyutu (punto)");
             let mut fs = self.font_size;
@@ -3707,15 +3866,38 @@ impl App {
             }
             ui.end_row();
         });
-        if ui.selectable_label(self.font_family == 1, "Sistem fontuna geç").clicked() {
-            self.font_family = 1;
-            self.apply_fonts(&ctx);
-            self.apply_font_size(&ctx);
-            self.save_config();
-        } else if ui.selectable_label(self.font_family == 0, "Roboto'ya dön").clicked() {
-            self.font_family = 0;
-            self.apply_fonts(&ctx);
-            self.apply_font_size(&ctx);
+        ui.label(egui::RichText::new("Seçilen yazı tipi anında uygulanır; tümü Türkçe karakter desteklidir.").small().weak());
+
+        ui.add_space(14.0);
+        ui.label("Zemin Teması:");
+        ui.horizontal_wrapped(|ui| {
+            let mut idx = match self.bg_style.as_str() {
+                "ocean" => 1, "forest" => 2, "royal" => 3, "sand" => 4, _ => 0,
+            };
+            combo_index(
+                ui,
+                "bg_style",
+                &mut idx,
+                &[],
+                &["Varsayılan", "Okyanus (Mavi)", "Orman (Yeşil)", "Mor Gece", "Kum (Sıcak)"],
+            );
+            let new_style = match idx {
+                1 => "ocean", 2 => "forest", 3 => "royal", 4 => "sand", _ => "default",
+            };
+            if new_style != self.bg_style {
+                self.bg_style = new_style.to_string();
+                self.apply_polish(&ctx);
+                self.save_config();
+            }
+            let mut wp = self.wallpaper;
+            if ui.checkbox(&mut wp, "🖼 Duvar Kağıdı (degrade zemin)").changed() {
+                self.wallpaper = wp;
+                self.apply_polish(&ctx);
+                self.save_config();
+            }
+        });
+        if ui.small_button("Zemini yeniden uygula").clicked() {
+            self.apply_polish(&ctx);
             self.save_config();
         }
 
@@ -3826,12 +4008,33 @@ impl App {
             };
             ui.end_row();
             ui.label("Varsayılan ölçek");
-            let zoom_pct = format!("{:.0}%", self.settings.default_zoom * 100.0);
-            ui.add(
-                egui::Slider::new(&mut self.settings.default_zoom, 0.6..=2.5)
-                    .step_by(0.05)
-                    .text(zoom_pct),
-            );
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    let mut z = self.settings.default_zoom;
+                    // Ok tuşlarıyla da kontrol edilebilen sayısal giriş
+                    let resp = ui.add(
+                        egui::DragValue::new(&mut z)
+                            .speed(0.05)
+                            .range(0.6..=2.5)
+                            .suffix("x"),
+                    );
+                    if resp.changed() {
+                        self.settings.default_zoom = z;
+                    }
+                    if ui.small_button("−").clicked() {
+                        self.settings.default_zoom = (self.settings.default_zoom - 0.05).max(0.6);
+                    }
+                    if ui.small_button("+").clicked() {
+                        self.settings.default_zoom = (self.settings.default_zoom + 0.05).min(2.5);
+                    }
+                    // Değişikliği bu bilgisayara anında uygula
+                    if (self.settings.default_zoom - self.zoom).abs() > 0.001 {
+                        let ctx = ui.ctx().clone();
+                        self.set_zoom(&ctx, self.settings.default_zoom);
+                    }
+                });
+                ui.label(egui::RichText::new("◀ ▶ ok tuşları veya −/+ ile ayarlanır; bu bilgisayara anında uygulanır ve yeni kullanıcılar için varsayılan olur.").small().weak());
+            });
             ui.end_row();
         });
 
@@ -3941,6 +4144,7 @@ impl App {
     fn profile_screen(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Profilim");
         ui.separator();
+        egui::ScrollArea::vertical().id_salt("profile_scroll").show(ui, |ui| {
         let photo = self.user.as_ref().and_then(|u| u.photo.clone());
 
         ui.horizontal(|ui| {
@@ -3974,9 +4178,8 @@ impl App {
             ui.vertical(|ui| {
                 egui::Grid::new("profile_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                     ui.label("Ad Soyad");
-                    let before = self.profile_name.clone();
-                    ui.add(egui::TextEdit::singleline(&mut self.profile_name).desired_width(280.0));
-                    if self.profile_name != before {
+                    let resp = ui.add(egui::TextEdit::singleline(&mut self.profile_name).desired_width(280.0));
+                    if resp.lost_focus() {
                         self.profile_name = tr_title_case(&self.profile_name);
                     }
                     ui.end_row();
@@ -4022,6 +4225,7 @@ impl App {
                 Err(e) => self.set_error(e),
             }
         }
+        });
     }
 }
 
@@ -4137,13 +4341,19 @@ fn pick_files() -> Option<Vec<PathBuf>> {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // Gömülü logoyu geçici dosyaya yaz; pencere ikonu olarak kullan
+        let icon_path = std::env::temp_dir().join("ic-software-dialog-icon.png");
+        let _ = std::fs::write(&icon_path, include_bytes!("../../../assets/app-logo.png"));
+        let icon = icon_path.to_string_lossy().to_string();
         // zenity veya kdialog dene
         let attempts: [(&str, Vec<&str>); 2] = [
-            ("zenity", vec!["--file-selection", "--multiple", "--separator=\n", "--file-filter=Resimler | *.jpg *.jpeg *.png *.webp *.gif *.bmp"]),
-            ("kdialog", vec!["--getopenfilename", ".", "Images (*.jpg *.jpeg *.png *.webp *.gif *.bmp)"]),
+            ("zenity", vec!["--file-selection", "--multiple", "--separator=\n", "--window-icon=&icon", "--title=İÇ SOFTWARE — Resim Seç", "--file-filter=Resimler | *.jpg *.jpeg *.png *.webp *.gif *.bmp"]),
+            ("kdialog", vec!["--getopenfilename", ".", "Images (*.jpg *.jpeg *.png *.webp *.gif *.bmp)", "--icon", &icon]),
         ];
         for (cmd, args) in attempts {
-            if let Ok(out) = std::process::Command::new(cmd).args(&args).output() {
+            let args: Vec<String> = args.into_iter().map(|a| a.replace("&icon", &icon)).collect();
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            if let Ok(out) = std::process::Command::new(cmd).args(&arg_refs).output() {
                 if out.status.success() {
                     let text = String::from_utf8_lossy(&out.stdout);
                     let files: Vec<PathBuf> = text.lines().filter(|l| !l.trim().is_empty()).map(PathBuf::from).collect();
@@ -4170,4 +4380,69 @@ fn pick_files() -> Option<Vec<PathBuf>> {
         }
         None
     }
+}
+
+
+/// Gömülü Türkçe destekli font aileleri: (seçim indeksi, veri anahtarı, dosya)
+pub const EMBEDDED_FONTS: [(&str, &str, &str); 4] = [
+    ("roboto_regular", "Roboto-Regular.ttf", "Roboto"),
+    ("opensans", "OpenSans-Regular.ttf", "Open Sans"),
+    ("firasans", "FiraSans-Regular.ttf", "Fira Sans"),
+    ("robotomono", "RobotoMono-Regular.ttf", "Roboto Mono"),
+];
+
+/// Ayarlardaki yazı tipi ailesi adları (indeks: 0 Roboto, 1 Sistem, 2.. gömülü).
+pub const FONT_NAMES: [&str; 5] = [
+    "Roboto (önerilen)",
+    "Sistem Fontu",
+    "Open Sans",
+    "Fira Sans",
+    "Roboto Mono",
+];
+
+fn font_bytes(file: &str) -> &'static [u8] {
+    match file {
+        "Roboto-Regular.ttf" => include_bytes!("../../../assets/fonts/Roboto-Regular.ttf"),
+        "Roboto-Bold.ttf" => include_bytes!("../../../assets/fonts/Roboto-Bold.ttf"),
+        "OpenSans-Regular.ttf" => include_bytes!("../../../assets/fonts/OpenSans-Regular.ttf"),
+        "FiraSans-Regular.ttf" => include_bytes!("../../../assets/fonts/FiraSans-Regular.ttf"),
+        "RobotoMono-Regular.ttf" => include_bytes!("../../../assets/fonts/RobotoMono-Regular.ttf"),
+        _ => &[],
+    }
+}
+
+/// Seçilen aileyi en başa alarak font tanımlarını kurar (index: 0 Roboto, 1 Sistem, 2+ gömülü).
+fn build_font_defs(chosen: usize) -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    for (key, file, _) in EMBEDDED_FONTS {
+        let bytes = font_bytes(file);
+        if !bytes.is_empty() {
+            fonts.font_data.insert(key.to_string(), egui::FontData::from_static(bytes));
+        }
+    }
+    fonts.font_data.insert(
+        "roboto_bold".to_string(),
+        egui::FontData::from_static(include_bytes!("../../../assets/fonts/Roboto-Bold.ttf")),
+    );
+
+    let prop = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+    let chosen_key = match chosen {
+        0 => Some("roboto_regular"),
+        2 => Some("opensans"),
+        3 => Some("firasans"),
+        4 => Some("robotomono"),
+        _ => None,
+    };
+    if let Some(k) = chosen_key {
+        prop.insert(0, k.to_string());
+    }
+    if !prop.iter().any(|f| f == "roboto_regular") {
+        prop.insert(0, "roboto_regular".to_string());
+    }
+
+    fonts.families.insert(
+        egui::FontFamily::Name("navbold".into()),
+        vec!["roboto_bold".to_string(), "roboto_regular".to_string()],
+    );
+    fonts
 }
