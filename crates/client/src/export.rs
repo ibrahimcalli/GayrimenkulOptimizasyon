@@ -93,6 +93,10 @@ fn build_lines(p: &Portfolio, owner: Option<&CrmRecord>, agent: &User, s: &Outpu
     v.push((loc, 0));
     if p.latitude != 0.0 || p.longitude != 0.0 {
         v.push((format!("Koordinat: {:.5}, {:.5}", p.latitude, p.longitude), 0));
+        v.push((
+            format!("Harita: https://maps.google.com/?q={},{}", p.latitude, p.longitude),
+            0,
+        ));
     }
     if s.show_description && !p.description.is_empty() {
         v.push(("".into(), 0));
@@ -233,11 +237,14 @@ pub fn export_pdf(
         Mm(297.0),
         "Katman 1",
     );
+    // Türkçe karakterleri tam destekleyen gömülü Roboto fontları
+    let roboto_regular = include_bytes!("../../../assets/fonts/Roboto-Regular.ttf");
+    let roboto_bold = include_bytes!("../../../assets/fonts/Roboto-Bold.ttf");
     let font = doc
-        .add_builtin_font(BuiltinFont::Helvetica)
+        .add_external_font(&mut std::io::Cursor::new(roboto_regular))
         .map_err(|e| e.to_string())?;
     let bold = doc
-        .add_builtin_font(BuiltinFont::HelveticaBold)
+        .add_external_font(&mut std::io::Cursor::new(roboto_bold))
         .map_err(|e| e.to_string())?;
     let layer_ref = doc.get_page(page).get_layer(layer);
 
@@ -251,7 +258,8 @@ pub fn export_pdf(
         };
         if !text.is_empty() {
             let f = if use_bold { &bold } else { &font };
-            layer_ref.use_text(tr_ascii(&text), size, Mm(18.0), Mm(y), f);
+            // Gömülü Roboto sayesinde Türkçe karakterler aynen yazılır
+            layer_ref.use_text(&text, size, Mm(18.0), Mm(y), f);
         }
         y -= size * 0.55 + 3.0;
         if y < 20.0 {
@@ -312,6 +320,7 @@ pub fn export_docx(
 
     // document.xml gövdesi
     let mut body = String::new();
+    let has_coords = p.latitude != 0.0 || p.longitude != 0.0;
 
     // Kapak resmi (tam genişlik)
     if let (Some(&(w, h)), Some(_)) = (image_sizes.first(), image_parts.first()) {
@@ -341,6 +350,14 @@ pub fn export_docx(
 
     for (text, kind) in &lines {
         body.push_str(&paragraph(text, *kind));
+    }
+
+    // Koordinat: tıklanabilir harita bağlantısı
+    if has_coords {
+        body.push_str(&hyperlink_paragraph(
+            &format!("Haritada Aç: {:.5}, {:.5}  (Google Maps)", p.latitude, p.longitude),
+            "rIdMap",
+        ));
     }
 
     let document_xml = format!(
@@ -377,6 +394,13 @@ pub fn export_docx(
                 r#"<Relationship Id="rIdImg{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image{}.jpeg"/>"#,
                 i + 1,
                 i + 1
+            ));
+        }
+        if has_coords {
+            let map_url = format!("https://maps.google.com/?q={},{}", p.latitude, p.longitude);
+            image_rels.push_str(&format!(
+                r#"<Relationship Id="rIdMap" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{}" TargetMode="External"/>"#,
+                esc_xml(&map_url)
             ));
         }
         format!(
@@ -438,6 +462,15 @@ fn drawing_paragraph(img_w: u32, img_h: u32, rid: &str) -> String {
     let cy = (MAX_W_EMU as f64 * ratio) as u64;
     format!(
         r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="1" name="Resim"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Resim"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+    )
+}
+
+/// Tıklanabilir harita bağlantısı paragrafı (mavi, altı çizili).
+fn hyperlink_paragraph(text: &str, rid: &str) -> String {
+    format!(
+        r#"<w:p><w:pPr><w:spacing w:after="120"/></w:pPr><w:hyperlink r:id="{rid}"><w:r><w:rPr><w:color w:val="2E74B5"/><w:u w:val="single"/><w:sz w:val="22"/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r></w:hyperlink></w:p>"#,
+        rid = esc_xml(rid),
+        text = esc_xml(text),
     )
 }
 

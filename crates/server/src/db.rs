@@ -264,6 +264,12 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    // Marka adı güncellemesi: eski başlık metnini yeni isme taşı
+    conn.execute(
+        "UPDATE settings SET header_text = 'İÇ SOFTWARE' WHERE header_text = 'GAYRİMENKUL360'",
+        [],
+    )?;
+
     // Varsayılan ekran yardım içerikleri (idempotent)
     let seed: &[(&str, &str, &str)] = &[
         ("welcome", "Portföyler (Karşılama)", "En güncelden en eskiye portföy listesi.\n\n• Görsel/Liste görünümü üstteki düğmelerle değişir (varsayılan: Görsel).\n• İlçe, tür ve durum filtrelerini kullanın; arama kutusuna yazıp Enter'a basın.\n• Admin: 'Silinmişleri göster' ile mantıksal silinen kayıtları görürsünüz.\n• Kısayol: Ctrl + fare tekerleği ile kart boyutunu değiştirin."),

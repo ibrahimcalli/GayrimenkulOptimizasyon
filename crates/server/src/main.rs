@@ -183,7 +183,7 @@ fn hostname() -> String {
 
 fn print_banner(port: u16, db_path: &std::path::Path) {
     println!("\n============================================================");
-    println!("  GAYRİMENKUL360 - Ofis Sunucusu çalışıyor");
+    println!("  İÇ SOFTWARE - Ofis Sunucusu çalışıyor (Gayrimenkul360)");
     println!("============================================================");
     println!("  Yerel adres  : http://127.0.0.1:{port}");
     for ip in local_ips() {

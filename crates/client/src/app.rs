@@ -43,12 +43,14 @@ pub struct FormState {
     pub building_age: String,
     pub floor: String,
     pub total_floors: String,
-    pub heating_choice: usize,
+    pub heating_choices: Vec<usize>,
     pub owner_type_choice: usize,
     pub furnished: bool,
     pub ilce: usize,    // 0 = seçilmedi, diğer: DISTRICTS[i-1]
     pub mahalle: usize, // 0 = seçilmedi
     pub address: String,
+    pub other_il: bool,
+    pub il_custom: String,
     pub latitude: f64,
     pub longitude: f64,
     pub description: String,
@@ -205,6 +207,7 @@ pub struct App {
 pub fn fresh_form() -> FormState {
     FormState {
         owner_choice: 1,
+        status: 0, // PortfolioStatus::ALL[0] = Aktif
         ..Default::default()
     }
 }
@@ -358,10 +361,33 @@ impl App {
     /// Tema + font + ölçek + renk vurgusu tercihlerinin tamamını uygular.
     fn apply_all_ui(&self, ctx: &egui::Context) {
         self.apply_theme(ctx);
+        self.apply_polish(ctx);
         self.apply_fonts(ctx);
         self.apply_font_size(ctx);
         self.apply_accent(ctx);
         ctx.set_zoom_factor(self.zoom as f32);
+    }
+
+    /// Modern sistem standardı görünüm: yumuşak köşeler, nefes alan boşluklar, katmanlı yüzeyler.
+    fn apply_polish(&self, ctx: &egui::Context) {
+        let mut st = (*ctx.style()).clone();
+        st.spacing.button_padding = egui::vec2(10.0, 6.0);
+        st.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        st.spacing.menu_margin = egui::Margin::symmetric(10.0, 8.0);
+        st.spacing.indent = 18.0;
+        let r = egui::Rounding::same(6.0);
+        st.visuals.window_rounding = r;
+        st.visuals.menu_rounding = r;
+        st.visuals.widgets.noninteractive.rounding = r;
+        st.visuals.widgets.inactive.rounding = r;
+        st.visuals.widgets.hovered.rounding = r;
+        st.visuals.widgets.active.rounding = r;
+        st.visuals.widgets.open.rounding = r;
+        let dark = st.visuals.dark_mode;
+        st.visuals.extreme_bg_color = if dark { egui::Color32::from_gray(24) } else { egui::Color32::from_gray(243) }; // TextEdit arka planı extreme_bg'den gelir
+        st.visuals.faint_bg_color = if dark { egui::Color32::from_gray(32) } else { egui::Color32::from_gray(248) };
+        st.visuals.widgets.inactive.weak_bg_fill = if dark { egui::Color32::from_gray(45) } else { egui::Color32::from_gray(235) };
+        ctx.set_style(st);
     }
 
     /// Yazı tipi ailesini uygular (Roboto gömülü / sistem fontu).
@@ -531,10 +557,11 @@ impl App {
             _ => None,
         };
         let status = match self.filter_status {
-            1 => Some("yayinda"),
-            2 => Some("kiralandi"),
-            3 => Some("satildi"),
-            4 => Some("taslak"),
+            1 => Some("aktif"),
+            2 => Some("yayinda"),
+            3 => Some("kiralandi"),
+            4 => Some("satildi"),
+            5 => Some("taslak"),
             _ => None,
         };
         let owner = if self.only_mine { self.user.as_ref().map(|u| u.id) } else { None };
@@ -842,7 +869,8 @@ impl eframe::App for App {
             self.side_panel(ctx);
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let panel_frame = egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(16.0, 12.0));
+        egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             match self.screen {
                 Screen::Login => self.login_screen(ui),
                 _ => {
@@ -948,8 +976,8 @@ impl App {
     fn login_screen(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
-            ui.heading(egui::RichText::new("GAYRİMENKUL360").size(34.0).strong());
-            ui.label("Ofis Portföy ve Müşteri Yönetim Sistemi");
+            ui.heading(egui::RichText::new("İÇ SOFTWARE").size(34.0).strong());
+            ui.label("Ofis Portföy ve Müşteri Yönetim Sistemi  •  Gayrimenkul360 motoru");
             ui.add_space(24.0);
 
             egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -1000,7 +1028,7 @@ impl App {
                     }
                     ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new("İlk giriş: admin / admin123  (sonra değiştirin)")
+                        egui::RichText::new("İlk giriş: admin / admin123  (ilk girişten sonra değiştirin)")
                             .small()
                             .weak(),
                     );
@@ -1042,7 +1070,7 @@ impl App {
         let role = self.user.as_ref().map(|u| u.role).unwrap_or(Role::Agent);
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading(egui::RichText::new("GAYRİMENKUL360").color(egui::Color32::from_rgb(46, 116, 181)));
+                ui.heading(egui::RichText::new("İÇ SOFTWARE").color(egui::Color32::from_rgb(46, 116, 181)).strong());
                 ui.separator();
                 if self.connected {
                     ui.colored_label(egui::Color32::from_rgb(60, 170, 90), "● Bağlı");
@@ -1239,6 +1267,52 @@ fn nav_button(
     }
 }
 
+/// Boşluk tuşuna basılınca ayraç ekler: "412 " -> "412/"
+pub fn smart_separator(s: &str, sep: char) -> String {
+    if s.ends_with(' ') {
+        let trimmed = s.trim_end_matches(' ');
+        if !trimmed.ends_with(sep) && !trimmed.is_empty() {
+            return format!("{trimmed}{sep}");
+        }
+        return trimmed.to_string();
+    }
+    s.to_string()
+}
+
+fn tr_upper(c: char) -> char {
+    match c {
+        'i' => 'İ',
+        'ı' => 'I',
+        c => c.to_uppercase().next().unwrap_or(c),
+    }
+}
+
+fn tr_lower(c: char) -> char {
+    match c {
+        'I' => 'ı',
+        'İ' => 'i',
+        c => c.to_lowercase().next().unwrap_or(c),
+    }
+}
+
+/// Her kelimenin ilk harfi büyük (Türkçe uyumlu): "ali veli" -> "Ali Veli"
+pub fn tr_title_case(s: &str) -> String {
+    let mut out = String::new();
+    let mut word_start = true;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            word_start = true;
+            out.push(c);
+        } else if word_start {
+            out.push(tr_upper(c));
+            word_start = false;
+        } else {
+            out.push(tr_lower(c));
+        }
+    }
+    out
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct ClientConfig {
     server_url: String,
@@ -1308,7 +1382,7 @@ impl App {
                 "w_status",
                 &mut self.filter_status,
                 &["Tümü"],
-                &["Yayında", "Kiralandı", "Satıldı", "Taslak"],
+                &["Aktif", "Yayında", "Kiralandı", "Satıldı", "Taslak"],
             );
             if ui.button("Filtrele").clicked() {
                 self.load_portfolios();
@@ -1523,7 +1597,7 @@ impl App {
                 ui.end_row();
 
                 ui.label("Durum");
-                combo_index(ui, "pf_st", &mut self.form.status, &[], &["Taslak", "Yayında", "Kiralandı", "Satıldı"]);
+                combo_index(ui, "pf_st", &mut self.form.status, &[], &["Aktif", "Taslak", "Yayında", "Kiralandı", "Satıldı"]);
                 ui.end_row();
 
                 ui.label("Fiyat");
@@ -1567,11 +1641,19 @@ impl App {
                 ui.end_row();
 
                 ui.label("Ada / Parsel");
-                ui.add(egui::TextEdit::singleline(&mut self.form.ada_parsel).desired_width(200.0).hint_text("Ada 123, Parsel 456"));
+                let before = self.form.ada_parsel.clone();
+                ui.add(egui::TextEdit::singleline(&mut self.form.ada_parsel).desired_width(200.0).hint_text("412 7 → 412/7"));
+                if self.form.ada_parsel != before {
+                    self.form.ada_parsel = smart_separator(&self.form.ada_parsel, '/');
+                }
                 ui.end_row();
 
                 ui.label("Oda Sayısı");
-                ui.add(egui::TextEdit::singleline(&mut self.form.room_count).desired_width(140.0).hint_text("3+1"));
+                let before = self.form.room_count.clone();
+                ui.add(egui::TextEdit::singleline(&mut self.form.room_count).desired_width(140.0).hint_text("3 1 → 3+1"));
+                if self.form.room_count != before {
+                    self.form.room_count = smart_separator(&self.form.room_count, '+');
+                }
                 ui.end_row();
 
                 ui.label("Bina Yaşı");
@@ -1586,8 +1668,21 @@ impl App {
                 });
                 ui.end_row();
 
-                ui.label("Isıtma");
-                combo_index(ui, "pf_heat", &mut self.form.heating_choice, &["Seçiniz"], &HEATINGS);
+                ui.label("Isıtma (çoklu seçim)");
+                ui.horizontal_wrapped(|ui| {
+                    for (i, h) in HEATINGS.iter().enumerate() {
+                        let mut sel = self.form.heating_choices.contains(&i);
+                        if ui.checkbox(&mut sel, *h).changed() {
+                            if sel {
+                                if !self.form.heating_choices.contains(&i) {
+                                    self.form.heating_choices.push(i);
+                                }
+                            } else {
+                                self.form.heating_choices.retain(|x| *x != i);
+                            }
+                        }
+                    }
+                });
                 ui.end_row();
 
                 ui.label("Eşyalı");
@@ -1595,7 +1690,20 @@ impl App {
                 ui.end_row();
 
                 ui.label("İl");
-                ui.label("Muğla (sabit)");
+                ui.horizontal(|ui| {
+                    if self.form.other_il {
+                        ui.add(egui::TextEdit::singleline(&mut self.form.il_custom).desired_width(140.0));
+                    } else {
+                        ui.label(egui::RichText::new("Muğla").strong());
+                    }
+                    let mut t = self.form.other_il;
+                    if ui.checkbox(&mut t, "Farklı il gireceğim").changed() {
+                        self.form.other_il = t;
+                        if t && self.form.il_custom.is_empty() {
+                            self.form.il_custom = "Muğla".to_string();
+                        }
+                    }
+                });
                 ui.end_row();
 
                 ui.label("İlçe *");
@@ -1608,7 +1716,11 @@ impl App {
                 ui.end_row();
 
                 ui.label("Açık Adres");
+                let before = self.form.address.clone();
                 ui.add(egui::TextEdit::singleline(&mut self.form.address).desired_width(360.0));
+                if self.form.address != before {
+                    self.form.address = tr_title_case(&self.form.address);
+                }
                 ui.end_row();
 
                 ui.label("Konum (Enlem, Boylam)");
@@ -1886,7 +1998,7 @@ impl App {
             title: self.form.title.trim().to_string(),
             listing_type: ListingType::ALL[self.form.listing_type.min(1)].as_str().to_string(),
             category: PropertyCategory::ALL[self.form.category.min(4)].as_str().to_string(),
-            status: PortfolioStatus::ALL[self.form.status.min(3)].as_str().to_string(),
+            status: PortfolioStatus::ALL[self.form.status.min(4)].as_str().to_string(),
             price: price_val,
             currency: CURRENCIES[self.form.currency.min(3)].to_string(),
             area_m2: self.form.area_m2,
@@ -1896,13 +2008,22 @@ impl App {
             building_age: self.form.building_age.clone(),
             floor: self.form.floor.clone(),
             total_floors: self.form.total_floors.clone(),
-            heating: if self.form.heating_choice == 0 {
-                String::new()
-            } else {
-                HEATINGS[(self.form.heating_choice - 1).min(HEATINGS.len() - 1)].to_string()
+            heating: {
+                let mut names: Vec<&str> = self
+                    .form
+                    .heating_choices
+                    .iter()
+                    .filter_map(|i| HEATINGS.get(*i).copied())
+                    .collect();
+                names.sort();
+                names.join(", ")
             },
             furnished: self.form.furnished,
-            il: "Muğla".to_string(),
+            il: if self.form.other_il && !self.form.il_custom.trim().is_empty() {
+                self.form.il_custom.trim().to_string()
+            } else {
+                "Muğla".to_string()
+            },
             ilce,
             mahalle,
             address: self.form.address.clone(),
@@ -1972,13 +2093,33 @@ impl App {
                 let imgs = portfolio.images.clone();
                 ui.horizontal_wrapped(|ui| {
                     for name in &imgs {
-                        if let Some(tex) = self.texture(ctx, name) {
-                            let resp = ui.add(
-                                egui::Image::new(egui::load::SizedTexture::new(tex.id(), egui::vec2(180.0, 135.0)))
-                                    .sense(egui::Sense::click()),
-                            );
-                            if resp.clicked() {
-                                self.cover_zoom = Some((name.clone(), 1.0));
+                        match self.texture(ctx, name) {
+                            Some(tex) => {
+                                let resp = ui.add(
+                                    egui::Image::new(egui::load::SizedTexture::new(tex.id(), egui::vec2(180.0, 135.0)))
+                                        .sense(egui::Sense::click()),
+                                );
+                                if resp.clicked() {
+                                    self.cover_zoom = Some((name.clone(), 1.0));
+                                }
+                            }
+                            None => {
+                                // Resim indirilemedi/çözülemedi: boş alan yerine net bilgi + yeniden dene
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(180.0, 135.0), egui::Sense::hover());
+                                ui.painter_at(rect).rect_filled(rect, 4.0, egui::Color32::from_gray(55));
+                                ui.painter_at(rect).text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    format!("Resim yüklenemedi\n{}", name),
+                                    egui::FontId::proportional(11.0),
+                                    egui::Color32::from_rgb(230, 120, 120),
+                                );
+                                if ui.small_button("⟳ Yeniden Dene").clicked() {
+                                    self.textures.remove(name);
+                                    self.set_error(format!(
+                                        "Resim sunucudan indirilemedi: {name}. Sunucunun data/uploads klasörünü ve bağlantıyı kontrol edin."
+                                    ));
+                                }
                             }
                         }
                     }
@@ -2005,7 +2146,24 @@ impl App {
                 detail_row(ui, "Konum", &format!("{} / {} / {}", portfolio.il, portfolio.ilce, portfolio.mahalle));
                 detail_row(ui, "Adres", &portfolio.address);
                 if portfolio.latitude != 0.0 || portfolio.longitude != 0.0 {
-                    detail_row(ui, "Koordinat", &format!("{:.5}, {:.5}", portfolio.latitude, portfolio.longitude));
+                    ui.label(egui::RichText::new("Koordinat").strong());
+                    let url = format!(
+                        "https://www.google.com/maps?q={},{}",
+                        portfolio.latitude, portfolio.longitude
+                    );
+                    if ui
+                        .link(
+                            egui::RichText::new(format!(
+                                "🗺 {:.5}, {:.5}   (tıkla → haritada aç)",
+                                portfolio.latitude, portfolio.longitude
+                            ))
+                            .color(egui::Color32::from_rgb(86, 156, 214)),
+                        )
+                        .clicked()
+                    {
+                        let _ = open::that(url);
+                    }
+                    ui.end_row();
                 }
                 detail_row(ui, "Danışman", &portfolio.created_by_name);
                 detail_row(ui, "Kayıt", &portfolio.created_at);
@@ -2090,10 +2248,15 @@ impl App {
             "isyeri" => 1, "arsa" => 2, "tarla" => 3, "turizm" => 4, _ => 0,
         };
         let status = match p.status.as_str() {
-            "yayinda" => 1, "kiralandi" => 2, "satildi" => 3, _ => 0,
+            "taslak" => 1, "yayinda" => 2, "kiralandi" => 3, "satildi" => 4, _ => 0,
         };
         let currency = CURRENCIES.iter().position(|c| *c == p.currency).unwrap_or(0);
-        let heating_choice = HEATINGS.iter().position(|h| *h == p.heating).map(|i| i + 1).unwrap_or(0);
+        let heating_choices: Vec<usize> = p
+            .heating
+            .split(',')
+            .map(|x| x.trim())
+            .filter_map(|x| HEATINGS.iter().position(|h| *h == x))
+            .collect();
         let owner_choice = if p.owner_crm_id.is_some() && self.is_admin() {
             self.crm.iter().position(|c| Some(c.id) == p.owner_crm_id).map(|i| i + 2).unwrap_or(0)
         } else {
@@ -2101,6 +2264,8 @@ impl App {
         };
         self.form = FormState {
             edit_id: Some(p.id),
+            other_il: p.il != "Muğla",
+            il_custom: p.il.clone(),
             title: p.title.clone(),
             listing_type: listing,
             category,
@@ -2115,7 +2280,7 @@ impl App {
             building_age: p.building_age.clone(),
             floor: p.floor.clone(),
             total_floors: p.total_floors.clone(),
-            heating_choice,
+            heating_choices,
             owner_type_choice: 0,
             furnished: p.furnished,
             ilce,
@@ -2931,7 +3096,11 @@ impl App {
                 ui.add_space(8.0);
                 egui::Grid::new("crm_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                     ui.label("Ad Soyad *");
+                    let before = self.crm_form.full_name.clone();
                     ui.add(egui::TextEdit::singleline(&mut self.crm_form.full_name).desired_width(300.0));
+                    if self.crm_form.full_name != before {
+                        self.crm_form.full_name = tr_title_case(&self.crm_form.full_name);
+                    }
                     ui.end_row();
                     ui.label("Telefon");
                     ui.add(egui::TextEdit::singleline(&mut self.crm_form.phone).desired_width(300.0));
@@ -3805,7 +3974,11 @@ impl App {
             ui.vertical(|ui| {
                 egui::Grid::new("profile_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                     ui.label("Ad Soyad");
+                    let before = self.profile_name.clone();
                     ui.add(egui::TextEdit::singleline(&mut self.profile_name).desired_width(280.0));
+                    if self.profile_name != before {
+                        self.profile_name = tr_title_case(&self.profile_name);
+                    }
                     ui.end_row();
                     ui.label("Telefon");
                     ui.add(egui::TextEdit::singleline(&mut self.profile_phone).desired_width(280.0));

@@ -163,6 +163,7 @@ pub enum PortfolioStatus {
     Yayinda,
     Kiralandi,
     Satildi,
+    Aktif,
 }
 
 impl PortfolioStatus {
@@ -172,6 +173,7 @@ impl PortfolioStatus {
             PortfolioStatus::Yayinda => "yayinda",
             PortfolioStatus::Kiralandi => "kiralandi",
             PortfolioStatus::Satildi => "satildi",
+            PortfolioStatus::Aktif => "aktif",
         }
     }
     pub fn from_str(s: &str) -> Self {
@@ -179,6 +181,7 @@ impl PortfolioStatus {
             "yayinda" => PortfolioStatus::Yayinda,
             "kiralandi" => PortfolioStatus::Kiralandi,
             "satildi" => PortfolioStatus::Satildi,
+            "aktif" => PortfolioStatus::Aktif,
             _ => PortfolioStatus::Taslak,
         }
     }
@@ -188,9 +191,11 @@ impl PortfolioStatus {
             PortfolioStatus::Yayinda => "Yayında",
             PortfolioStatus::Kiralandi => "Kiralandı",
             PortfolioStatus::Satildi => "Satıldı",
+            PortfolioStatus::Aktif => "Aktif",
         }
     }
-    pub const ALL: [PortfolioStatus; 4] = [
+    pub const ALL: [PortfolioStatus; 5] = [
+        PortfolioStatus::Aktif,
         PortfolioStatus::Taslak,
         PortfolioStatus::Yayinda,
         PortfolioStatus::Kiralandi,
@@ -486,7 +491,7 @@ impl Default for OutputSettings {
             show_address: true,
             show_description: true,
             show_cover_image: true,
-            header_text: "GAYRİMENKUL360".to_string(),
+            header_text: "İÇ SOFTWARE".to_string(),
             footer_text: "Bu tanıtım belgesi Gayrimenkul360 tarafından oluşturulmuştur.".to_string(),
             val_title_min: 3,
             val_phone_digits: 10,
